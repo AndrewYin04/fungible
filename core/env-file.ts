@@ -2,11 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from 'dotenv';
 import { DATA_DIR } from './paths.js';
+import { SECRET_FILE_MODE, ensureSecureDir, secureFile } from './fs-perms.js';
 
 export const ENV_PATH = path.join(DATA_DIR, '.env');
 
-/** The .env holds PLAID_SECRET, LLM API keys and FUNGIBLE_API_KEY: owner-only. */
-export const SECRET_FILE_MODE = 0o600;
+/** The .env holds PLAID_SECRET, LLM API keys and FUNGIBLE_API_KEY: owner-only.
+ *  Re-exported for callers that already import it from here; the policy itself
+ *  lives in core/fs-perms.ts alongside the database and backup modes. */
+export { SECRET_FILE_MODE };
 
 const KEY_RE = /^([A-Z][A-Z0-9_]*)=/;
 const LINE_RE = /^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/;
@@ -48,19 +51,7 @@ export function secureEnvFile(): { changed: boolean; previousMode?: number } {
     return { changed: false }; // no file yet — writeEnvFile creates it 0600
   }
   if (!stat.isFile()) return { changed: false };
-  const mode = stat.mode & 0o777;
-  if (mode === SECRET_FILE_MODE) return { changed: false };
-  try {
-    fs.chmodSync(ENV_PATH, SECRET_FILE_MODE);
-    return { changed: true, previousMode: mode };
-  } catch (err) {
-    process.stderr.write(
-      `[fungible] warning: ${ENV_PATH} is mode ${mode.toString(8)} and could not be ` +
-      `tightened to 600 (${(err as Error).message}). It holds your Plaid secret — ` +
-      `run: chmod 600 ${ENV_PATH}\n`,
-    );
-    return { changed: false, previousMode: mode };
-  }
+  return secureFile(ENV_PATH);
 }
 
 /** Load DATA_DIR/.env into process.env. Every entry point uses this so the
@@ -85,7 +76,7 @@ export function writeEnvFile(updates: EnvUpdates): { written: string[]; path: st
   const written = Object.keys(filtered);
   if (written.length === 0) return { written, path: ENV_PATH };
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  ensureSecureDir(DATA_DIR);
 
   const existing = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8') : '';
   const lines = existing ? existing.split('\n') : [];

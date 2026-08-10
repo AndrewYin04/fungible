@@ -7,10 +7,11 @@
  * embedded agent handles those before calling executeTool.
  */
 
-import { writeFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { notifyChange } from './refresh.js';
 import { DATA_DIR } from './paths.js';
+import { writeSecretFileSync } from './fs-perms.js';
 import { getRangeSummary, getMonthlySummary, getTagSummary, getCategoryDriftData, getMerchantSummary, getNetWorthHistory, getLinkedAccounts, type NetWorthGranularity, type CategoryDrift } from './queries.js';
 import { solveTVM } from './calculator.js';
 import { getDriftWindows, getPeriodStart, formatPeriodLabel } from './dateUtils.js';
@@ -889,7 +890,7 @@ async function executeToolImpl(
       const specStr = str('spec');
       const spec = JSON.parse(specStr);
       const entry = appendHistory({ title: spec.title ?? 'Untitled', prompt: str('prompt'), spec });
-      writeFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...spec, _historyId: entry.id, _writtenAt: Date.now() }), 'utf-8');
+      writeSecretFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...spec, _historyId: entry.id, _writtenAt: Date.now() }));
       return `Canvas "${entry.title}" rendered on screen 9 (id: ${entry.id}).`;
     }
 
@@ -904,7 +905,7 @@ async function executeToolImpl(
     case 'load_canvas': {
       const entry = getHistoryEntry(str('id'));
       if (!entry) return `No canvas found with id "${str('id')}".`;
-      writeFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...entry.spec, _historyId: entry.id, _writtenAt: Date.now() }), 'utf-8');
+      writeSecretFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...entry.spec, _historyId: entry.id, _writtenAt: Date.now() }));
       return `Canvas "${entry.title}" loaded on screen 9.`;
     }
 

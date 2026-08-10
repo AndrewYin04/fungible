@@ -3,10 +3,19 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { encryptToken } from './crypto.js';
 import { DATA_DIR } from './paths.js';
+import { ensureSecureDir, secureFile, touchSecureFile } from './fs-perms.js';
 
 const DB_PATH = path.join(DATA_DIR, 'fungible.db');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+// The database holds every transaction, balance and account mask in plaintext.
+// SQLite creates its file 0644 regardless of umask, so pre-create it 0600 and
+// hand SQLite an existing (empty, therefore valid) database to open; SQLite
+// copies the main file's mode onto the -wal/-shm/-journal sidecars it derives.
+// An install from an earlier version is tightened in place.
+ensureSecureDir(DATA_DIR);
+touchSecureFile(DB_PATH);
+secureFile(DB_PATH);
+for (const sidecar of ['-wal', '-shm', '-journal']) secureFile(DB_PATH + sidecar);
 
 export const db: Client = createClient({ url: `file:${DB_PATH}` });
 

@@ -5,7 +5,7 @@ import { loadEnvFile } from '../core/env-file.js';
 loadEnvFile({ quiet: true });
 import React from 'react';
 import { render } from 'ink';
-import { writeFileSync } from 'node:fs';
+import { writeSecretFileSync } from '../core/fs-perms.js';
 import stripAnsi from 'strip-ansi';
 import { initDb } from '../core/db.js';
 import { backupDb } from '../core/backup.js';
@@ -29,7 +29,8 @@ const _origWrite = process.stdout.write.bind(process.stdout);
   clearTimeout(_captureTimer);
   _captureTimer = setTimeout(() => {
     const clean = stripAnsi(_lastChunk).trimEnd();
-    if (clean) try { writeFileSync(SCREEN_PATH, clean, 'utf-8'); } catch { /* ignore */ }
+    // screen.txt is a rendering of the owner's balances and transactions.
+    if (clean) try { writeSecretFileSync(SCREEN_PATH, clean); } catch { /* ignore */ }
   }, 80);
   return result;
 };

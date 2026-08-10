@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR } from './paths.js';
+import { writeSecretFileSync } from './fs-perms.js';
 import type { CanvasSpec } from './canvas-agent.js';
 
 export const CANVAS_HISTORY_PATH = join(DATA_DIR, 'canvas-history.json');
@@ -37,14 +38,14 @@ export function appendHistory(entry: Omit<CanvasHistoryEntry, 'id' | 'createdAt'
       versions: (existing.versions ?? 1) + 1,
     };
     const rest = history.filter((e) => e.id !== existing.id);
-    writeFileSync(CANVAS_HISTORY_PATH, JSON.stringify([saved, ...rest], null, 2), 'utf-8');
+    writeSecretFileSync(CANVAS_HISTORY_PATH, JSON.stringify([saved, ...rest], null, 2));
   } else {
     saved = {
       ...entry,
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       createdAt: new Date().toISOString(),
     };
-    writeFileSync(CANVAS_HISTORY_PATH, JSON.stringify([saved, ...history], null, 2), 'utf-8');
+    writeSecretFileSync(CANVAS_HISTORY_PATH, JSON.stringify([saved, ...history], null, 2));
   }
   return saved;
 }
@@ -66,7 +67,7 @@ export function deleteHistoryEntry(id: string): boolean {
   const history = loadHistory();
   const next = history.filter((e) => e.id !== id);
   if (next.length === history.length) return false;
-  writeFileSync(CANVAS_HISTORY_PATH, JSON.stringify(next, null, 2), 'utf-8');
+  writeSecretFileSync(CANVAS_HISTORY_PATH, JSON.stringify(next, null, 2));
   return true;
 }
 
