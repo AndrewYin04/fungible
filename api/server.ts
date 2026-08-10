@@ -1,7 +1,6 @@
-import { config } from 'dotenv';
-import { join } from 'node:path';
-import { DATA_DIR } from '../core/paths.js';
-config({ path: join(DATA_DIR, '.env') });
+import { loadEnvFile } from '../core/env-file.js';
+// Loads the secrets file and re-tightens it to 0600 if anything loosened it.
+loadEnvFile();
 
 import { fileURLToPath } from 'node:url';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';

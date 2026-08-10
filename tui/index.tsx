@@ -1,7 +1,8 @@
-import { config } from 'dotenv';
 import { join } from 'node:path';
 import { DATA_DIR } from '../core/paths.js';
-config({ path: join(DATA_DIR, '.env'), quiet: true });
+import { loadEnvFile } from '../core/env-file.js';
+// Loads the secrets file and re-tightens it to 0600 if anything loosened it.
+loadEnvFile({ quiet: true });
 import React from 'react';
 import { render } from 'ink';
 import { writeFileSync } from 'node:fs';

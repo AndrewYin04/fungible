@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
-import fs from 'node:fs';
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { seedRules } from '../core/seed-rules.js';
-import { DATA_DIR } from '../core/paths.js';
+import { readEnvFile, writeEnvFile } from '../core/env-file.js';
 import { getSetting, setSetting, daysFromStartDate, DEFAULT_START_DATE_KEY, MAX_DAYS_REQUESTED, START_DATE_BUFFER_DAYS } from '../core/settings.js';
 import { C_POSITIVE, C_NEGATIVE, C_WARNING, C_ACCENT } from './ui.js';
 import { TextInput } from './components/index.js';
@@ -24,30 +22,9 @@ type Step =
 type PlaidEnv = 'sandbox' | 'production';
 const PLAID_ENVS: PlaidEnv[] = ['sandbox', 'production'];
 
-const ENV_PATH = path.join(DATA_DIR, '.env');
-
-function readEnv(): Record<string, string> {
-  const envPath = ENV_PATH;
-  const out: Record<string, string> = {};
-  if (!fs.existsSync(envPath)) return out;
-  for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
-}
-
-function writeEnv(values: Record<string, string>) {
-  const envPath = ENV_PATH;
-  const existing = readEnv();
-  const merged = { ...existing, ...values };
-  const content = Object.entries(merged).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
-  fs.writeFileSync(envPath, content, 'utf8');
-}
-
 export function Setup() {
   const { exit } = useApp();
-  const existing = readEnv();
+  const existing = readEnvFile();
 
   const [step, setStep] = useState<Step>('welcome');
 
@@ -78,7 +55,10 @@ export function Setup() {
     !!existing['PLAID_CLIENT_ID'] && !!existing['PLAID_SECRET'] && !!existing['PLAID_ENV'];
 
   function savePlaidCreds() {
-    writeEnv({
+    // writeEnvFile is the single writer: it creates the file 0600, chmods a
+    // pre-existing one, preserves unrelated keys/comments, and rejects values
+    // containing line breaks (which would otherwise inject extra env entries).
+    writeEnvFile({
       PLAID_CLIENT_ID: clientId.trim(),
       PLAID_SECRET: secret.trim(),
       PLAID_ENV: PLAID_ENVS[plaidEnvIdx],

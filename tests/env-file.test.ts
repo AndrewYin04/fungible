@@ -13,7 +13,7 @@ const { TEST_DATA_DIR } = vi.hoisted(() => {
 
 vi.mock('../core/paths.js', () => ({ DATA_DIR: TEST_DATA_DIR }));
 
-import { writeEnvFile } from '../core/env-file.js';
+import { loadEnvFile, readEnvFile, secureEnvFile, writeEnvFile } from '../core/env-file.js';
 
 const ENV_PATH = path.join(TEST_DATA_DIR, '.env');
 
@@ -83,5 +83,70 @@ describe('writeEnvFile', () => {
   it('rejects invalid key names', () => {
     expect(() => writeEnvFile({ 'bad key': 'x' })).toThrow(/Invalid env key/);
     expect(() => writeEnvFile({ 'X=Y\nZ': 'x' })).toThrow(/Invalid env key/);
+  });
+});
+
+describe('readEnvFile', () => {
+  it('returns {} when the file does not exist', () => {
+    expect(readEnvFile()).toEqual({});
+  });
+
+  it('parses keys, ignoring comments and blank lines, honouring export/quotes', () => {
+    fs.writeFileSync(
+      ENV_PATH,
+      '# bank\nPLAID_CLIENT_ID=abc\n\nexport PLAID_SECRET="shh"\n  FUNGIBLE_BACKUP_DAYS = 14 \nnot a key\n',
+    );
+    expect(readEnvFile()).toEqual({
+      PLAID_CLIENT_ID: 'abc',
+      PLAID_SECRET: 'shh',
+      FUNGIBLE_BACKUP_DAYS: '14',
+    });
+  });
+
+  it('takes the last assignment of a repeated key, like dotenv', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_ENV=sandbox\nPLAID_ENV=production\n');
+    expect(readEnvFile().PLAID_ENV).toBe('production');
+  });
+
+  it('round-trips what writeEnvFile wrote', () => {
+    writeEnvFile({ PLAID_CLIENT_ID: 'abc', PLAID_SECRET: 'shh', PLAID_ENV: 'sandbox' });
+    expect(readEnvFile()).toEqual({ PLAID_CLIENT_ID: 'abc', PLAID_SECRET: 'shh', PLAID_ENV: 'sandbox' });
+  });
+});
+
+describe('secureEnvFile', () => {
+  it('is a no-op when there is no env file', () => {
+    expect(secureEnvFile()).toEqual({ changed: false });
+    expect(fs.existsSync(ENV_PATH)).toBe(false);
+  });
+
+  it('tightens a group/world-readable file to 0600', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_SECRET=shh\n');
+    fs.chmodSync(ENV_PATH, 0o664);
+    expect(secureEnvFile()).toEqual({ changed: true, previousMode: 0o664 });
+    expect(fs.statSync(ENV_PATH).mode & 0o777).toBe(0o600);
+    // contents untouched
+    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_SECRET=shh\n');
+  });
+
+  it('leaves an already-0600 file alone', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_SECRET=shh\n');
+    fs.chmodSync(ENV_PATH, 0o600);
+    expect(secureEnvFile()).toEqual({ changed: false });
+    expect(fs.statSync(ENV_PATH).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('loadEnvFile', () => {
+  it('tightens the file and loads its values into process.env', () => {
+    fs.writeFileSync(ENV_PATH, 'FUNGIBLE_TEST_LOAD=loaded\n');
+    fs.chmodSync(ENV_PATH, 0o644);
+    delete process.env.FUNGIBLE_TEST_LOAD;
+
+    loadEnvFile({ quiet: true });
+
+    expect(process.env.FUNGIBLE_TEST_LOAD).toBe('loaded');
+    expect(fs.statSync(ENV_PATH).mode & 0o777).toBe(0o600);
+    delete process.env.FUNGIBLE_TEST_LOAD;
   });
 });

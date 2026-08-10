@@ -1,12 +1,10 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import type { IncomingMessage } from 'node:http';
-import { DATA_DIR } from './paths.js';
-import { writeEnvFile } from './env-file.js';
+import { ENV_PATH, writeEnvFile } from './env-file.js';
 
 /** Where the API key is persisted (same file the Plaid/LLM keys live in, 0600). */
-export const ENV_PATH = path.join(DATA_DIR, '.env');
+export { ENV_PATH };
 
 const ENV_LINE_RE = /^\s*(?:export\s+)?FUNGIBLE_API_KEY\s*=\s*(.*)$/;
 
