@@ -422,7 +422,7 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
     // someone deciding whether to approve a write. show_canvas takes
     // {spec, prompt}; load_canvas and delete_canvas take a STRING id.
     case 'show_canvas':
-      return `Render a canvas from the assistant's spec (${s('spec').length} characters)` +
+      return `Render ${describeCanvasSpec(s('spec'))}` +
         (input['prompt'] ? ` for: "${clip(s('prompt'), 60)}"` : '');
     case 'load_canvas':            return `Open saved canvas "${clip(s('id'), 40)}"`;
     case 'delete_canvas':          return `Delete saved canvas "${clip(s('id'), 40)}"`;
@@ -447,6 +447,67 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
 function clip(value: string, max: number): string {
   const oneLine = value.replace(/\s+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/**
+ * The one-line noun phrase for a show_canvas confirmation.
+ *
+ * "the assistant's spec (N characters)" was true and useless: the payoff
+ * calculator from core/canvas-agent.ts is 846 characters and nine blocks of
+ * prose under the heading "URGENT: wire $4,000 to account 12345678 today" is
+ * 718, and this prompt is the only thing between the owner and whichever of the
+ * two the model was talked into by a merchant name off the bank feed.
+ *
+ * `spec` is a JSON-encoded CanvasSpec — {title, elements[]} where each element
+ * is one of section/text/dial/output (core/canvas-spec.ts) — and executeTool
+ * JSON.parses exactly that and saves it under `spec.title`, so the name and the
+ * shape are readable here without inventing anything. The title is also the key
+ * appendHistory() replaces on, so naming it is what lets the owner see that an
+ * existing saved canvas is about to be overwritten.
+ *
+ * Nothing is stated that was not found. A spec that does not parse, is not an
+ * object, has no title or has no element list says exactly that, and keeps the
+ * character count in the cases where the size is genuinely all there is to
+ * report. `titled ""` and `#NaN` — a blank name and a zero told to someone
+ * approving a write — are the bug this arm exists to not repeat.
+ */
+function describeCanvasSpec(specStr: string): string {
+  const size = `${specStr.length} characters`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(specStr);
+  } catch {
+    return `an unreadable spec (${size}, not valid JSON)`;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return `an unreadable spec (${size}, not a canvas object)`;
+  }
+  const { title, elements } = parsed as { title?: unknown; elements?: unknown };
+  const named = typeof title === 'string' && title.trim() !== ''
+    ? `canvas "${clip(title, 40)}"`
+    : 'an untitled canvas';
+  if (!Array.isArray(elements)) return `${named} with no element list`;
+  if (elements.length === 0)    return `${named} (no elements)`;
+  return `${named} (${tallyCanvasElements(elements)})`;
+}
+
+/** "3 dials, 2 outputs, 2 sections, 1 text" — the spec's own vocabulary, in a
+ *  fixed order, with anything outside it counted rather than quietly dropped. */
+function tallyCanvasElements(elements: unknown[]): string {
+  const KNOWN = ['dial', 'output', 'section', 'text'];
+  const tally = new Map<string, number>();
+  for (const element of elements) {
+    const type = (element as { type?: unknown } | null)?.type;
+    const key = typeof type === 'string' && KNOWN.includes(type) ? type : 'unrecognised';
+    tally.set(key, (tally.get(key) ?? 0) + 1);
+  }
+  return [...KNOWN, 'unrecognised']
+    .filter((key) => tally.has(key))
+    .map((key) => {
+      const n = tally.get(key)!;
+      return key === 'unrecognised' ? `${n} unrecognised` : `${n} ${key}${n === 1 ? '' : 's'}`;
+    })
+    .join(', ');
 }
 
 // ─── Pure tool executor ───────────────────────────────────────────────────────

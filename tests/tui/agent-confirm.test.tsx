@@ -219,6 +219,47 @@ describe('a write tool that does have a description', () => {
     expect(vi.mocked(executeTool).mock.calls.map((c) => c[0])).toEqual(['toggle_hidden_category']);
   });
 
+  /**
+   * show_canvas is the write whose whole point is the content it produces. It
+   * was confirmed as "Render a canvas from the assistant's spec (846
+   * characters)", which tells the owner nothing about what the canvas will say —
+   * and the model may have been steered into saying it by a merchant name off
+   * the bank feed. This is the prompt as the owner reads it.
+   */
+  it('shows the owner what the canvas is, not how many characters it is', async () => {
+    const spec = JSON.stringify({
+      title: 'Credit Card Payoff',
+      elements: [
+        { type: 'text', content: 'based on your $21,494 in credit card debt' },
+        { type: 'section', label: 'INPUTS' },
+        { type: 'dial', dial: { key: 'balance', label: 'Balance', default: 21494, step: 500, format: 'dollar', hint: 'current balance' } },
+        { type: 'dial', dial: { key: 'rate', label: 'APR', default: 22, step: 0.5, format: 'percent', hint: 'annual rate' } },
+        { type: 'dial', dial: { key: 'monthly', label: 'Monthly payment', default: 500, step: 50, format: 'dollar', hint: 'what you pay each month' } },
+        { type: 'section', label: 'RESULTS' },
+        { type: 'output', output: { label: 'Months to payoff', expr: 'balance / monthly', format: 'months' } },
+        { type: 'output', output: { label: 'Total interest', expr: 'balance * rate / 100', format: 'dollar' } },
+      ],
+    });
+    scriptedTurns.push([
+      { type: 'tool_use', id: 'call-1', name: 'show_canvas', input: { spec, prompt: 'how long to pay off my credit card' } },
+    ]);
+    scriptedTurns.push([{ type: 'text', delta: 'Canvas is on screen 9.' }]);
+
+    const r = openChat();
+    await ask(r, 'how long to pay off my credit card');
+
+    await waitFor(() => expect(frame(r)).toContain('[y] confirm'));
+    const shown = frame(r).replace(/\s+/g, ' ');
+    expect(shown).toContain('Payoff');       // what it is called, and what it may replace
+    expect(shown).toContain('dials');        // an interactive calculator…
+    expect(shown).toContain('outputs');      // …with computed figures
+    expect(shown).not.toContain('characters'); // the measurement that separated nothing
+
+    r.stdin.write('y');
+    await waitFor(() => expect(frame(r)).toContain('Canvas is on screen 9.'));
+    expect(vi.mocked(executeTool).mock.calls.map((c) => c[0])).toEqual(['show_canvas']);
+  });
+
   it('does not run when the owner says no', async () => {
     scriptedTurns.push([
       { type: 'tool_use', id: 'call-1', name: 'toggle_hidden_category', input: { category: 'Dining', hide: true } },
