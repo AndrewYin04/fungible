@@ -227,9 +227,14 @@ export const registry = {
     getLastSyncedAt,
   },
   config: {
-    writeEnv: async (updates: EnvUpdates): Promise<{ written: string[] }> => {
-      const { written } = writeEnvFile(updates);
-      return { written };
+    // A key given with an empty value REMOVES it from .env (core/env-file.ts).
+    // The renderer's Configuration panel says a blank field keeps the current
+    // value, so it does not send blank fields at all — both halves of that
+    // contract have to stay true, and `cleared` is reported rather than
+    // swallowed so a caller that does send one is not told "saved 0 values".
+    writeEnv: async (updates: EnvUpdates): Promise<{ written: string[]; cleared: string[] }> => {
+      const { written, cleared } = writeEnvFile(updates);
+      return { written, cleared };
     },
   },
   settings: {

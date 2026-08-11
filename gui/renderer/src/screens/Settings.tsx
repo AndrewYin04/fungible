@@ -170,15 +170,24 @@ function ConfigPanel({ showStatus }: { showStatus: (msg: string) => void }) {
   async function save() {
     setSaving(true);
     try {
-      const payload: Record<string, string> = { ...values };
+      // Only the fields the owner actually filled in. A field left blank —
+      // including one they typed into and then cleared — means "keep what is
+      // there", which is what the panel promises above; writeEnvFile reads a
+      // key it is GIVEN with an empty value as "remove this key", which is a
+      // different intention and not one this panel offers.
+      const payload: Record<string, string> = {};
+      for (const [key, value] of Object.entries(values)) {
+        if (value.trim() !== '') payload[key] = value;
+      }
       if (plaidEnv) payload['PLAID_ENV'] = plaidEnv;
-      const { written } = await api.config.writeEnv(payload);
+      const { written, cleared } = await api.config.writeEnv(payload);
       setValues({});
       setPlaidEnv('');
+      const changed = written.length + cleared.length;
       showStatus(
-        written.length === 0
+        changed === 0
           ? 'Nothing to save'
-          : `Saved ${written.length} value${written.length === 1 ? '' : 's'} · restart to apply`,
+          : `Saved ${changed} value${changed === 1 ? '' : 's'} · restart to apply`,
       );
     } catch (e) {
       showStatus(`Save failed: ${e instanceof Error ? e.message : String(e)}`);

@@ -49,11 +49,54 @@ describe('writeEnvFile', () => {
     expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_CLIENT_ID=abc\nANTHROPIC_API_KEY=sk-ant-test\n');
   });
 
-  it('skips empty/whitespace values without touching their existing entries', () => {
-    fs.writeFileSync(ENV_PATH, 'PLAID_CLIENT_ID=keepme\n');
-    const { written } = writeEnvFile({ PLAID_CLIENT_ID: '   ', ANTHROPIC_API_KEY: '' });
+  /**
+   * An empty value used to mean "ignore this key", so a credential could be
+   * written but never removed: the Setup wizard blanked PLAID_SECRET, said
+   * nothing, and left the old secret on disk. The two intentions are different
+   * and the caller can state both — a key it passes empty is one it wants gone,
+   * a key it does not pass is one it is not touching.
+   */
+  it('removes a key it is given with an empty or whitespace value', () => {
+    fs.writeFileSync(
+      ENV_PATH,
+      '# bank\nPLAID_CLIENT_ID=cid\nPLAID_SECRET=shh\nANTHROPIC_API_KEY=sk-ant\n\nFUNGIBLE_BACKUP_DAYS=14\n',
+    );
+    const { written, cleared } = writeEnvFile({ PLAID_SECRET: '   ', ANTHROPIC_API_KEY: '' });
+
     expect(written).toEqual([]);
-    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_CLIENT_ID=keepme\n');
+    expect(cleared.sort()).toEqual(['ANTHROPIC_API_KEY', 'PLAID_SECRET']);
+    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe(
+      '# bank\nPLAID_CLIENT_ID=cid\n\nFUNGIBLE_BACKUP_DAYS=14\n',
+    );
+    expect(readEnvFile().PLAID_SECRET).toBeUndefined();
+  });
+
+  it('leaves a key it was not given alone', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_CLIENT_ID=keepme\nPLAID_SECRET=shh\n');
+    const { written, cleared } = writeEnvFile({ PLAID_SECRET: 'new' });
+    expect(written).toEqual(['PLAID_SECRET']);
+    expect(cleared).toEqual([]);
+    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_CLIENT_ID=keepme\nPLAID_SECRET=new\n');
+  });
+
+  it('removes every assignment of a repeated key, not just the last', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_ENV=sandbox\nPLAID_ENV=production\nPLAID_SECRET=shh\n');
+    const { cleared } = writeEnvFile({ PLAID_ENV: '' });
+    expect(cleared).toEqual(['PLAID_ENV']);
+    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_SECRET=shh\n');
+  });
+
+  it('does not create a file just to record that a cleared key is absent', () => {
+    const { written, cleared } = writeEnvFile({ PLAID_SECRET: '' });
+    expect(written).toEqual([]);
+    expect(cleared).toEqual([]);
+    expect(fs.existsSync(ENV_PATH)).toBe(false);
+  });
+
+  it('reports nothing cleared for a key that was not in the file', () => {
+    fs.writeFileSync(ENV_PATH, 'PLAID_CLIENT_ID=cid\n');
+    expect(writeEnvFile({ OPENAI_API_KEY: '' }).cleared).toEqual([]);
+    expect(fs.readFileSync(ENV_PATH, 'utf8')).toBe('PLAID_CLIENT_ID=cid\n');
   });
 
   it('trims provided values before writing', () => {

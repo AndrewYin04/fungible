@@ -7,6 +7,23 @@ import { getSetting, setSetting, daysFromStartDate, DEFAULT_START_DATE_KEY, MAX_
 import { C_POSITIVE, C_NEGATIVE, C_WARNING, C_ACCENT } from './ui.js';
 import { TextInput } from './components/index.js';
 
+/** process.env has no "unset" value: assigning '' leaves the variable present
+ *  and empty, which is not the same thing as a credential the owner removed. */
+function setProcessEnv(key: string, value: string): void {
+  if (value) process.env[key] = value;
+  else delete process.env[key];
+}
+
+/** What an empty credential field is about to do when the wizard saves. Blank
+ *  means remove, so the owner is told that before they press Enter — and told
+ *  the harmless version when there is nothing stored to remove. */
+function BlankFieldNote({ emptied, stored, label }: { emptied: boolean; stored?: string; label: string }) {
+  if (!emptied) return null;
+  return stored
+    ? <Text color={C_WARNING}>Empty — your saved Plaid {label} will be removed when you save</Text>
+    : <Text dimColor>Empty — leave it blank to skip Plaid for now</Text>;
+}
+
 type Step =
   | 'welcome'
   | 'plaid-choice'
@@ -58,15 +75,23 @@ export function Setup() {
     // writeEnvFile is the single writer: it creates the file 0600, chmods a
     // pre-existing one, preserves unrelated keys/comments, and rejects values
     // containing line breaks (which would otherwise inject extra env entries).
+    //
+    // A field the owner emptied is passed as an empty string, which is how
+    // writeEnvFile is told to remove that key. It used to ignore empty values,
+    // so clearing a credential here moved the wizard on while the old secret
+    // stayed on disk.
+    const clientIdValue = clientId.trim();
+    const secretValue = secret.trim();
     writeEnvFile({
-      PLAID_CLIENT_ID: clientId.trim(),
-      PLAID_SECRET: secret.trim(),
+      PLAID_CLIENT_ID: clientIdValue,
+      PLAID_SECRET: secretValue,
       PLAID_ENV: PLAID_ENVS[plaidEnvIdx],
     });
-    // Reload env for the current process
-    process.env['PLAID_CLIENT_ID'] = clientId.trim();
-    process.env['PLAID_SECRET'] = secret.trim();
-    process.env['PLAID_ENV'] = PLAID_ENVS[plaidEnvIdx];
+    // Reload env for the current process. A credential that was removed has to
+    // go from here too, or this process keeps using it until it restarts.
+    setProcessEnv('PLAID_CLIENT_ID', clientIdValue);
+    setProcessEnv('PLAID_SECRET', secretValue);
+    setProcessEnv('PLAID_ENV', PLAID_ENVS[plaidEnvIdx]);
   }
 
   function startLink() {
@@ -135,7 +160,11 @@ export function Setup() {
 
     if (step === 'plaid-client-id') {
       if (key.escape) { setStep('plaid-choice'); return; }
-      if (key.return && clientId.trim()) { setStep('plaid-secret'); return; }
+      // An empty field is allowed through: it is how the owner says "remove the
+      // one I have". Refusing to move on left them stuck on a field they had
+      // deliberately cleared, with Enter falling through to the printable-input
+      // branch below and typing a carriage return into the value.
+      if (key.return) { setStep('plaid-secret'); return; }
       if (key.backspace || key.delete) { setClientId((v) => v.slice(0, -1)); return; }
       if (input && !key.ctrl && !key.meta) { setClientId((v) => v + input); return; }
       return;
@@ -143,7 +172,7 @@ export function Setup() {
 
     if (step === 'plaid-secret') {
       if (key.escape) { setStep('plaid-client-id'); return; }
-      if (key.return && secret.trim()) { setStep('plaid-env'); return; }
+      if (key.return) { setStep('plaid-env'); return; }
       if (key.backspace || key.delete) { setSecret((v) => v.slice(0, -1)); return; }
       if (input && !key.ctrl && !key.meta) { setSecret((v) => v + input); return; }
       return;
@@ -258,6 +287,7 @@ export function Setup() {
                 credential shown in the clear here is readable from there. */}
             <TextInput value={'*'.repeat(clientId.length)} color={C_WARNING} />
           </Box>
+          <BlankFieldNote emptied={clientId.trim() === ''} stored={existing['PLAID_CLIENT_ID']} label="Client ID" />
           <Text dimColor>Enter to continue · Esc back</Text>
         </Box>
       )}
@@ -270,6 +300,7 @@ export function Setup() {
             <Text>Secret: </Text>
             <TextInput value={'*'.repeat(secret.length)} color={C_WARNING} />
           </Box>
+          <BlankFieldNote emptied={secret.trim() === ''} stored={existing['PLAID_SECRET']} label="Secret" />
           <Text dimColor>Enter to continue · Esc back</Text>
         </Box>
       )}
