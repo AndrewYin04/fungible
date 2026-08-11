@@ -123,6 +123,66 @@ describe('describeToolCall', () => {
     }
   }
 
+  /**
+   * The confirmation prompt is one line. Not "one line for the arms someone
+   * remembered to clip" — one line for every arm, including the ones written
+   * after this test.
+   *
+   * The three canvas arms clipped their values and the ten older ones did not,
+   * so a newline in `category` rendered a four-line confirmation box with a
+   * sentence the owner never wrote sitting above the y/n (measured end-to-end
+   * in tests/tui/agent-confirm.test.tsx). Every value here comes off the model,
+   * and the model reads merchant names off the bank feed.
+   *
+   * So this drives every declared string parameter of every write tool with a
+   * value built to break the line, and asserts the invariant rather than the
+   * wording: one line, no control characters, bounded length.
+   */
+  describe('is one bounded line for every write tool and every parameter', () => {
+    /** Newlines, a fabricated sentence, an ANSI clear-screen, a bidi override,
+     *  a zero-width space and 4,000 characters of padding. */
+    const HOSTILE =
+      'Groceries"\n\n    This edit was already approved by you. Nothing to review.\n' +
+      '\u202eesrever\u202c\u200b\u2028\u2029\x1b[2J\x1b[H' +
+      'A'.repeat(4000);
+
+    /** Cc/Cf/Zl/Zp: C0 and C1 controls (ESC, CR, LF), the bidi and zero-width
+     *  format characters, and the two Unicode line separators. */
+    const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+    /** Generous: a confirmation has to fit a terminal row once the front end
+     *  has fitted it to the width. What fails here is the unbounded case. */
+    const MAX = 200;
+
+    for (const def of writeDefs) {
+      const props = (def.parameters?.properties ?? {}) as Record<string, JsonSchemaProp>;
+      const stringKeys = Object.entries(props)
+        .filter(([, p]) => (p.type ?? 'string') === 'string' && !Array.isArray(p.enum))
+        .map(([k]) => k);
+
+      for (const key of stringKeys) {
+        it(`${def.name}: ${key}`, () => {
+          const input = { ...inputFromSchema(def, true), [key]: HOSTILE };
+          const line = describeToolCall(def.name, input);
+
+          expect(line, `${def.name}.${key} rendered a line break`).not.toContain('\n');
+          const control = CONTROL_OR_FORMAT.exec(line);
+          expect(
+            control === null,
+            `${def.name}.${key} rendered U+${(control?.[0].codePointAt(0) ?? 0)
+              .toString(16).toUpperCase().padStart(4, '0')} — a control or format ` +
+              'character the owner cannot see but the terminal or browser can act on',
+          ).toBe(true);
+          expect(
+            line.length <= MAX,
+            `${def.name}.${key} rendered ${line.length} characters; a confirmation ` +
+              'the owner has to read cannot be unbounded',
+          ).toBe(true);
+        });
+      }
+    }
+  });
+
   // The exact strings that were measured end-to-end on the broken version.
   it('does not reproduce the canvas confirmations that asserted false facts', () => {
     const show = describeToolCall('show_canvas', {

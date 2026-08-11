@@ -396,8 +396,50 @@ export const TOOL_DEFS: ToolDef[] = [
 
 // ─── Human-readable write tool descriptions (for confirmation prompts) ─────────
 
+/**
+ * The longest confirmation line describeToolCall will return, and the longest
+ * single value it will interpolate into one.
+ *
+ * Both bounds exist because every value in a confirmation arrives from the
+ * model, and the model reads merchant names off the bank feed. The field bound
+ * is what keeps the SENTENCE readable — clipping the whole line instead would
+ * cut the tail off `… [id: 1]`, which is the part telling the owner which
+ * transaction they are about to change. The line bound is the backstop: it
+ * applies to whatever an arm returns, so no arm can be long by construction.
+ *
+ * Neither is a display width. A front end fits the line to its own window
+ * (tui/Chat.tsx truncates to the terminal column count); these say only that
+ * what it is handed is one line and finite.
+ */
+export const DESCRIPTION_MAX_CHARS = 160;
+const FIELD_MAX_CHARS = 40;
+
+/**
+ * The one line the owner reads before approving a write.
+ *
+ * Every return value goes through clip(), so the invariant is a property of
+ * this function rather than of each arm remembering: one line, no control or
+ * format characters, at most DESCRIPTION_MAX_CHARS long. An arm added later
+ * cannot reintroduce a multi-line confirmation, and neither can an input.
+ */
 export function describeToolCall(name: string, input: Record<string, unknown>): string {
-  const s = (k: string) => String(input[k] ?? '');
+  return clip(describeToolCallBody(name, input), DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Fit arbitrary text into the same single bounded line. core/agent.ts builds
+ * its refusal text around a tool NAME that also came from the model, so it
+ * needs the same treatment.
+ */
+export function toConfirmationLine(text: string): string {
+  return clip(text, DESCRIPTION_MAX_CHARS);
+}
+
+function describeToolCallBody(name: string, input: Record<string, unknown>): string {
+  /** Every model-supplied value an arm interpolates goes through here. */
+  const s = (k: string, max = FIELD_MAX_CHARS) => clip(String(input[k] ?? ''), max);
+  /** Unclipped — only for the arm that has to parse and measure its value. */
+  const raw = (k: string) => String(input[k] ?? '');
   const n = (k: string) => Number(input[k] ?? 0);
   switch (name) {
     case 'edit_transaction':       return `Set transaction category to "${s('category')}" [id: ${s('id')}]`;
@@ -422,10 +464,10 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
     // someone deciding whether to approve a write. show_canvas takes
     // {spec, prompt}; load_canvas and delete_canvas take a STRING id.
     case 'show_canvas':
-      return `Render ${describeCanvasSpec(s('spec'))}` +
-        (input['prompt'] ? ` for: "${clip(s('prompt'), 60)}"` : '');
-    case 'load_canvas':            return `Open saved canvas "${clip(s('id'), 40)}"`;
-    case 'delete_canvas':          return `Delete saved canvas "${clip(s('id'), 40)}"`;
+      return `Render ${describeCanvasSpec(raw('spec'))}` +
+        (input['prompt'] ? ` for: "${s('prompt', 60)}"` : '');
+    case 'load_canvas':            return `Open saved canvas "${s('id')}"`;
+    case 'delete_canvas':          return `Delete saved canvas "${s('id')}"`;
     default:
       // FAIL CLOSED. This gate is the only thing standing between the owner and a
       // write the agent was talked into by text arriving through the bank feed —
@@ -443,10 +485,32 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
   }
 }
 
-/** Trim a string for display, so an injected wall of text cannot bury the prompt. */
+/**
+ * Everything that is not printable text on a single line, replaced by a space
+ * before whitespace is collapsed:
+ *
+ *   Cc  C0/C1 controls — LF and CR (which added lines to the confirmation box),
+ *       ESC (which is how an ANSI sequence starts), NUL, backspace.
+ *   Cf  format characters — the bidi overrides U+202A–U+202E and isolates
+ *       U+2066–U+2069, which reorder what is displayed without changing what is
+ *       there; zero-width space/joiner; the BOM.
+ *   Zl/Zp  U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR.
+ *
+ * Replaced rather than deleted, so `a\nb` reads as "a b" and not "ab": what the
+ * value contains is evidence, and the point is to make it inert, not to hide it.
+ */
+const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * Collapse a value to one line and clip it, so neither an injected wall of text
+ * nor an injected line break can shape the prompt it is shown inside.
+ */
 function clip(value: string, max: number): string {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+  const oneLine = value.replace(CONTROL_OR_FORMAT, ' ').replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  // Never cut between a surrogate pair — half a code point is not a character.
+  const cut = /[\uD800-\uDBFF]/.test(oneLine.charAt(max - 1)) ? max - 1 : max;
+  return `${oneLine.slice(0, cut)}…`;
 }
 
 /**

@@ -7,7 +7,7 @@ import 'dotenv/config';
 import { streamResponse, makeAssistantMessage, detectProvider, getProviderModel } from './llm-provider.js';
 import type { Message, ContentBlock, ToolDef } from './llm-provider.js';
 import { APP_CONTEXT } from './agent-context.js';
-import { TOOL_DEFS, WRITE_TOOLS, describeToolCall, executeTool } from './tools.js';
+import { TOOL_DEFS, WRITE_TOOLS, describeToolCall, executeTool, toConfirmationLine } from './tools.js';
 import { loadCanvasContext } from './canvas-agent.js';
 import { buildPriorCanvasesSection } from './canvas-history.js';
 
@@ -125,11 +125,15 @@ function describeForOwner(name: string, input: Record<string, unknown>): Descrip
   try {
     return { ok: true, ownerText: describeToolCall(name, input) };
   } catch (err) {
-    // Front matter first: this is truncated to one line in both front ends, so
-    // the verdict and the tool name have to survive the clip.
+    // Front matter first: each front end fits this to its own window, so the
+    // verdict and the tool name have to survive the clip. `name` came off the
+    // model like every other value in a confirmation, so it goes through the
+    // same one-line bound rather than being trusted to be a plain identifier.
     return {
       ok: false,
-      ownerText: `Refused "${name}": it cannot be confirmed — no description exists for this write tool`,
+      ownerText: toConfirmationLine(
+        `Refused "${name}": it cannot be confirmed — no description exists for this write tool`,
+      ),
       reason: err instanceof Error ? err.message : String(err),
     };
   }
