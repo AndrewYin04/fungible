@@ -1,0 +1,42 @@
+### fungible REST API :3456 (lane :3401) — NO Authorization header sent
+
+$ cat rest.log
+  ◇ injected env (0) from security-review/lab/lanes/l1/fungible-data/.env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+  [fungible-api] Warning: FUNGIBLE_API_KEY not set — all requests accepted
+  [fungible-api] Listening on http://127.0.0.1:3401
+
+$ curl -X POST http://127.0.0.1:3401/tools/get_balances -d '{}'
+  Assets:
+    High-Yield Savings: $18,500.00 (savings)
+    Everyday Checking: $8,420.00 (checking)
+    Brokerage: $34,200.00 (brokerage)
+    Total assets: $61,120.00
+  Liabilities:
+    Rewards Visa: -$1,340.00
+    Total liabilities: -$1,340.00
+  Net worth: $62,460.00
+  Cash (checking/savings): $26,920.00
+  Liquid (incl. brokerage): $61,120.00
+
+$ curl -X POST http://127.0.0.1:3401/tools/list_accounts -d '{}'
+  Everyday Checking (checking) ···4242 — First National Bank
+  High-Yield Savings (savings) ···8888 — First National Bank
+  Brokerage (brokerage) ···5678 — Fidelity
+  Rewards Visa (credit card) ···1234 — Chase
+
+$ curl -X POST http://127.0.0.1:3401/tools/list_transactions -d '{"limit":4}'
+  2026-08-19      Sweetgreen                            -$    15.75  Dining  [demo-t044]
+  2026-08-18      CVS Pharmacy                          -$    22.40  Medical  [demo-t071]
+  2026-08-17      MTA NYC Transit                       -$    33.00  Transportation  [demo-t052]
+  2026-08-16      Whole Foods Market                    -$    63.80  Grocery  [demo-t032]
+
+$ curl -X POST http://127.0.0.1:3401/tools/get_financial_health -d '{}'
+  Net worth: $62,460
+  Cash runway: 31.4 months ($26,920 in checking/savings)
+  Liquid runway: 71.3 months ($61,120 incl. brokerage)
+  Avg monthly expenses (12 mo): $857
+  Avg monthly income (12 mo): $1,051 take-home
+  Avg monthly savings (12 mo): $194 take-home
+  Savings rate: 18.4%
+  FIRE number: $257,238
+  FIRE pr

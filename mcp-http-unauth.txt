@@ -1,0 +1,14 @@
+### fungible MCP-over-HTTP :3741 (lane :3701) — no auth of any kind
+
+-- WRITE tool, unauthenticated, no confirmation gate on this path --
+$ tools/call add_rule
+"text":"Rule added: \"
+
+
+$ tools/call list_rules  (read back)
+MCP_UNAUTH_WRITE_PROBE
+
+-- get_screen: returns whatever the user is currently looking at --
+$ tools/call get_screen
+"text":"Screen not available — TUI may not be running."
+

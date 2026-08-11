@@ -1,0 +1,59 @@
+◇ injected env (0) from ../../../work/pr-e2e/fungible-setup-data/.env // tip: ⌘ suppress logs { quiet: true }
+
+
+   fungible  setup
+
+   Welcome to fungible
+
+
+   This wizard will help you:
+     · Configure Plaid credentials (to sync bank accounts)
+     · Choose how far back to pull transactions
+     · Link your first bank account
+     · Seed starter category rules
+
+
+   Press Enter to begin
+
+
+
+
+   fungible  setup
+
+   Plaid credentials
+
+   Plaid lets fungible sync transactions directly from your bank. You need a free Plaid developer account at 
+   plaid.com.
+
+
+   Do you have a Plaid account?  [y] Yes  [n] Skip
+
+
+
+
+   fungible  setup
+
+   Plaid Client ID
+
+   Found in your Plaid dashboard under Team Settings → Keys
+
+
+   Client ID: ▊
+
+   Enter to continue · Esc back
+
+
+
+
+   fungible  setup
+
+   Plaid Client ID
+
+   Found in your Plaid dashboard under Team Settings → Keys
+
+
+   Client ID: ************************▊
+
+   Enter to continue · Esc back
+
+
