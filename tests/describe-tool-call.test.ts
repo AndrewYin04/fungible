@@ -40,7 +40,8 @@ vi.mock('../core/db.js', async () => {
   return { db: await makeTestDb() };
 });
 
-import { describeToolCall, TOOL_DEFS, WRITE_TOOLS } from '../core/tools.js';
+import { describeToolCall, registerToolKinds, TOOL_DEFS } from '../core/tools.js';
+import type { ClassifiedToolDef } from '../core/tools.js';
 import type { ToolDef } from '../core/llm-provider.js';
 
 /** Marks of a value the arm reached for and did not find. */
@@ -91,13 +92,13 @@ function inputFromSchema(def: ToolDef, booleansTrue: boolean): Record<string, un
   return input;
 }
 
-const writeDefs = TOOL_DEFS.filter((d) => WRITE_TOOLS.has(d.name));
+/** Enumerated from the definitions themselves — see the classification block
+ *  at the foot of this file for why there is no list of names to consult. */
+const writeDefs = TOOL_DEFS.filter((d) => d.kind === 'write');
 
 describe('describeToolCall', () => {
-  it('has a definition for every write tool (the confirmation gate has nothing to read otherwise)', () => {
-    const described = new Set(writeDefs.map((d) => d.name));
-    const missing = [...WRITE_TOOLS].filter((n) => !described.has(n));
-    expect(missing).toEqual([]);
+  it('finds write tools to describe at all', () => {
+    expect(writeDefs.length).toBeGreaterThan(0);
   });
 
   for (const def of writeDefs) {
@@ -346,15 +347,67 @@ describe('describeToolCall(show_canvas)', () => {
   });
 
   it('refuses to confirm a write tool nobody has described, rather than showing its name', () => {
-    WRITE_TOOLS.add('delete_everything');
-    try {
-      expect(() => describeToolCall('delete_everything', {})).toThrow(/Refusing to confirm/);
-    } finally {
-      WRITE_TOOLS.delete('delete_everything');
-    }
+    expect(() => describeToolCall('delete_everything', {})).toThrow(/Refusing to confirm/);
   });
 
   it('still passes a read-only tool through by name', () => {
     expect(describeToolCall('spending_summary', {})).toBe('spending_summary');
+  });
+});
+
+/**
+ * The refusal used to key off WRITE_TOOLS.has(name), so it covered the twelve
+ * names in that set and nothing else: describeToolCall('wipe_everything', {})
+ * returned the bare string 'wipe_everything' with no throw, and the
+ * confirmation gate in core/agent.ts keyed off the same set, so a write tool
+ * added to TOOL_DEFS without being listed was executed with no confirmation at
+ * all. A hand-maintained list of names is only ever as current as the last
+ * person who remembered to add to it — the fourth time in this review that has
+ * been the defect.
+ *
+ * TOOL_DEFS is what actually decides which tools exist, so the classification
+ * lives on the definitions and everything else is derived from it. What these
+ * assert is the shape of the guarantee: read is the only thing waved through,
+ * an unclassified tool is refused, and a tool cannot be added without a kind.
+ */
+describe('tool classification', () => {
+  it('classifies every tool in TOOL_DEFS as exactly one of read or write', () => {
+    const unclassified = TOOL_DEFS
+      .filter((d) => d.kind !== 'read' && d.kind !== 'write')
+      .map((d) => `${d.name} (kind: ${JSON.stringify(d.kind)})`);
+    expect(unclassified).toEqual([]);
+  });
+
+  it('refuses a name nobody classified, rather than returning it as a description', () => {
+    expect(() => describeToolCall('wipe_everything', {})).toThrow(/Refusing to confirm/);
+  });
+
+  it('has an arm for every tool classified write, enumerated from the definitions', () => {
+    for (const def of TOOL_DEFS.filter((d) => d.kind === 'write')) {
+      expect(() => describeToolCall(def.name, {}), def.name).not.toThrow();
+    }
+  });
+
+  it('rejects a tool definition that carries no kind, at registration', () => {
+    // @ts-expect-error kind is required, so a tool added without one is a
+    // compile error — the guard that runs before any of these tests do. This
+    // line failing to error is itself a test failure.
+    const unclassified: ClassifiedToolDef = {
+      name: 'wipe_everything',
+      description: 'Delete everything.',
+      parameters: { type: 'object', properties: {} },
+    };
+    expect(() => registerToolKinds([unclassified])).toThrow(/not classified/);
+  });
+
+  it('rejects the same tool being registered as read and as write', () => {
+    const def = {
+      name: 'ambiguous_tool',
+      description: 'x',
+      parameters: { type: 'object', properties: {} },
+      kind: 'read',
+    } as ClassifiedToolDef;
+    registerToolKinds([def]);
+    expect(() => registerToolKinds([{ ...def, kind: 'write' }])).toThrow(/both/);
   });
 });

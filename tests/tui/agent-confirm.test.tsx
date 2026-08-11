@@ -62,7 +62,7 @@ vi.mock('../../core/tools.js', async (importActual) => {
 });
 
 import { Chat } from '../../tui/Chat.js';
-import { executeTool, WRITE_TOOLS } from '../../core/tools.js';
+import { executeTool } from '../../core/tools.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -105,7 +105,9 @@ function toolResults(): string[] {
     .map((m) => m.content);
 }
 
-/** A write tool that was added to WRITE_TOOLS without a describeToolCall arm. */
+/** A tool name the confirmation gate cannot classify or describe — what a
+ *  write tool added to TOOL_DEFS without a `kind`, or without a
+ *  describeToolCall arm, looks like from here. */
 const UNDESCRIBED = 'delete_everything';
 
 beforeEach(() => {
@@ -116,7 +118,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  WRITE_TOOLS.delete(UNDESCRIBED);
 });
 
 afterAll(() => {
@@ -128,7 +129,6 @@ afterAll(() => {
 
 describe('a write tool with no description', () => {
   it('is refused without running, the owner is told why, and the turn finishes', async () => {
-    WRITE_TOOLS.add(UNDESCRIBED);
     scriptedTurns.push([
       { type: 'text', delta: 'Tidying that up. ' },
       { type: 'tool_use', id: 'call-1', name: UNDESCRIBED, input: { scope: 'all' } },
@@ -162,7 +162,6 @@ describe('a write tool with no description', () => {
   });
 
   it('does not take the rest of the turn down with it', async () => {
-    WRITE_TOOLS.add(UNDESCRIBED);
     scriptedTurns.push([
       { type: 'tool_use', id: 'call-1', name: UNDESCRIBED, input: {} },
       { type: 'tool_use', id: 'call-2', name: 'spending_summary', input: { year: 2026, month: 8 } },
@@ -178,8 +177,33 @@ describe('a write tool with no description', () => {
     expect(vi.mocked(executeTool).mock.calls.map((c) => c[0])).toEqual(['spending_summary']);
   });
 
+  /**
+   * The refusal, and the confirmation gate above it, both keyed off
+   * WRITE_TOOLS.has(name) — a hand-maintained list of twelve names. A tool
+   * that was not on it was neither confirmed nor refused: dispatchTool fell
+   * straight through to executeTool. That is the wrong default for the one
+   * gate standing between the owner and a write, so an unclassified name is
+   * now refused like an undescribable one.
+   */
+  it('refuses a name no definition classifies, instead of executing it unconfirmed', async () => {
+    scriptedTurns.push([
+      { type: 'tool_use', id: 'call-1', name: 'wipe_everything', input: { scope: 'all' } },
+    ]);
+    scriptedTurns.push([{ type: 'text', delta: 'That action was refused.' }]);
+
+    const r = openChat();
+    await ask(r, 'clean up my data');
+    await waitFor(() => expect(frame(r)).toContain('That action was refused.'));
+
+    const out = frame(r);
+    expect(out).toContain('Refused');
+    expect(out).toContain('wipe_everything');
+    expect(out).not.toContain('[y] confirm');
+    expect(vi.mocked(executeTool)).not.toHaveBeenCalled();
+    expect(toolResults().join('\n')).toMatch(/Refused/i);
+  });
+
   it('leaves the conversation usable for the next message', async () => {
-    WRITE_TOOLS.add(UNDESCRIBED);
     scriptedTurns.push([{ type: 'tool_use', id: 'call-1', name: UNDESCRIBED, input: {} }]);
     scriptedTurns.push([{ type: 'text', delta: 'Refusing that.' }]);
     scriptedTurns.push([{ type: 'text', delta: 'Your August spend was $1,234.' }]);

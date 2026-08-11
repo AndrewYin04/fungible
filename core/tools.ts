@@ -31,24 +31,85 @@ import type { ToolDef } from './llm-provider.js';
 
 import { CANVAS_SPEC_PATH, appendHistory, searchHistory, getHistoryEntry, deleteHistoryEntry } from './canvas-history.js';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Tool classification ──────────────────────────────────────────────────────
 
-// Keep in sync with executeTool — any tool that mutates data must be listed here
-// or TUI refresh and afterWrite callbacks will be silently skipped for that tool.
-export const WRITE_TOOLS = new Set([
-  'edit_transaction', 'clear_edit', 'ignore_transaction',
-  'add_rule', 'delete_rule', 'add_name_rule', 'delete_name_rule',
-  'tag_transaction', 'toggle_hidden_category', 'sync',
-  'show_canvas', 'load_canvas', 'delete_canvas',
-]);
+/**
+ * What a tool does to the owner's data. `write` is confirmed before it runs and
+ * refreshes the UI afterwards; `read` is the only thing that runs unasked.
+ */
+export type ToolKind = 'read' | 'write';
+
+/**
+ * A tool definition plus its kind. `kind` is required, so a tool cannot be
+ * added to TOOL_DEFS without being classified — that is a compile error, not
+ * something a reviewer has to notice.
+ */
+export type ClassifiedToolDef = ToolDef & { kind: ToolKind };
+
+const TOOL_KINDS = new Map<string, ToolKind>();
+
+/**
+ * Record what each definition is, so the gates can ask the definitions instead
+ * of consulting a list of names.
+ *
+ * This replaced a hand-maintained `WRITE_TOOLS` set. Both gates keyed off it —
+ * the confirmation in core/agent.ts and the refusal in describeToolCall — so a
+ * write tool added to TOOL_DEFS and not added to the set was neither confirmed
+ * nor refused, just executed; and describeToolCall('wipe_everything', {})
+ * returned the bare string 'wipe_everything'. A list of names is only ever as
+ * current as the last person who remembered to add to it.
+ *
+ * Throws rather than defaulting: an unclassified tool is a bug in the source,
+ * and this runs at import, so every entry point (tui, gui, mcp, api) fails
+ * immediately and loudly rather than at the moment someone is asked to approve
+ * something nobody classified. TypeScript catches it first; this catches the
+ * definition that reached here from JavaScript or through a cast.
+ *
+ * Exported because core/agent.ts adds two tools of its own to the model's list
+ * (`show`, `generate_canvas`) that are not in TOOL_DEFS. Registering the same
+ * name twice with the same kind is fine — re-registering it with a different
+ * one is not.
+ */
+export function registerToolKinds(defs: readonly ClassifiedToolDef[]): void {
+  for (const def of defs) {
+    if (def.kind !== 'read' && def.kind !== 'write') {
+      throw new Error(
+        `Tool "${def.name}" is not classified: kind must be 'read' or 'write'. ` +
+          'Anything not classified read is put in front of the owner for approval, ' +
+          'and anything with no description is refused, so an unclassified tool ' +
+          'cannot be called at all.',
+      );
+    }
+    const previous = TOOL_KINDS.get(def.name);
+    if (previous !== undefined && previous !== def.kind) {
+      throw new Error(
+        `Tool "${def.name}" is registered as both ${previous} and ${def.kind}.`,
+      );
+    }
+    TOOL_KINDS.set(def.name, def.kind);
+  }
+}
+
+/** The kind of a registered tool, or undefined for a name nobody defined. */
+export function toolKind(name: string): ToolKind | undefined {
+  return TOOL_KINDS.get(name);
+}
+
+/** True only for a tool that is registered AND classified write. An unknown
+ *  name is not a write — it is nothing, and callers refuse it rather than
+ *  treating it as harmless. */
+export function isWriteTool(name: string): boolean {
+  return TOOL_KINDS.get(name) === 'write';
+}
 
 // ─── Tool definitions (all except the agent-only `show` tool) ─────────────────
 
-export const TOOL_DEFS: ToolDef[] = [
+export const TOOL_DEFS: ClassifiedToolDef[] = [
   // ── Data / read ────────────────────────────────────────────────────────────
 
   {
     name: 'spending_summary',
+    kind: 'read',
     description: 'Get income, expenses, net, and spending by category. Provide either (year + month) for a specific month, or (from + to) for a date range.',
     parameters: {
       type: 'object',
@@ -62,6 +123,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'merchant_summary',
+    kind: 'read',
     description: 'Get top merchants for a category in a date range, with total amount, transaction count, and share of category spend.',
     parameters: {
       type: 'object',
@@ -77,6 +139,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_transactions',
+    kind: 'read',
     description: 'List transactions with optional filters. Returns date, name, amount, category, account, and ID.',
     parameters: {
       type: 'object',
@@ -94,16 +157,19 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_accounts',
+    kind: 'read',
     description: 'List all connected accounts (banks, credit cards, manual assets).',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'get_balances',
+    kind: 'read',
     description: 'Get current balances for all accounts, plus net worth, total cash, and total liquid assets.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'get_financial_health',
+    kind: 'read',
     description: 'Get financial health metrics: cash and liquid runway months, FIRE number, progress, and estimated years to retirement.',
     parameters: {
       type: 'object',
@@ -115,6 +181,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_scorecard',
+    kind: 'read',
     description: 'Spending scorecard: which categories are significantly over or under the typical month (12-month median baseline), with per-category deltas and a net verdict. Use for "how am I doing lately / where did my spending go wrong". Defaults to the trailing 30 days, which is fully populated even early in a calendar month.',
     parameters: {
       type: 'object',
@@ -128,6 +195,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_trends',
+    kind: 'read',
     description: 'Month-by-month spending trends for the last N months. Optionally filter to a specific category.',
     parameters: {
       type: 'object',
@@ -139,26 +207,31 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_rules',
+    kind: 'read',
     description: 'List all category rules.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_name_rules',
+    kind: 'read',
     description: 'List all name rules (rules that rename transaction display names).',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_hidden_categories',
+    kind: 'read',
     description: 'List categories hidden from totals and charts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_tags',
+    kind: 'read',
     description: 'List all tags with transaction counts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'tag_summary',
+    kind: 'read',
     description: 'Get income, expenses, net, and category breakdown for all transactions with a given tag.',
     parameters: {
       type: 'object',
@@ -170,6 +243,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'uncategorized_summary',
+    kind: 'read',
     description: 'Show the most common uncategorized transaction names, useful for writing new rules.',
     parameters: {
       type: 'object',
@@ -180,6 +254,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_finance_guide',
+    kind: 'read',
     description: 'Get opinionated personal finance guidance. Omit topic for an overview; provide a topic for detailed advice.',
     parameters: {
       type: 'object',
@@ -194,6 +269,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_net_worth_history',
+    kind: 'read',
     description: 'Net worth over time, grouped by day, week, month, quarter, or year. Returns assets, liabilities, and net worth for each period.',
     parameters: {
       type: 'object',
@@ -208,6 +284,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'calculate_tvm',
+    kind: 'read',
     description: 'Time Value of Money solver. Provide any 4 of 5 variables (pv, fv, pmt, n, rate) and it solves for the missing one. Rate is the periodic rate (e.g. monthly rate = annual% / 1200). Sign convention: outflows negative, inflows positive.',
     parameters: {
       type: 'object',
@@ -225,6 +302,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: 'edit_transaction',
+    kind: 'write',
     description: 'Manually set the category for a specific transaction (pins it — survives re-syncs). Use list_transactions to get the ID.',
     parameters: {
       type: 'object',
@@ -237,6 +315,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'clear_edit',
+    kind: 'write',
     description: 'Remove a manual category override from a transaction, reverting to rule-based categorization.',
     parameters: {
       type: 'object',
@@ -248,6 +327,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'ignore_transaction',
+    kind: 'write',
     description: 'Toggle the ignored flag on a transaction. Ignored transactions are hidden from totals and charts.',
     parameters: {
       type: 'object',
@@ -260,6 +340,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'add_rule',
+    kind: 'write',
     description: 'Add a category rule and immediately apply it to all transactions.',
     parameters: {
       type: 'object',
@@ -277,6 +358,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_rule',
+    kind: 'write',
     description: 'Delete a category rule by ID. Use list_rules to find the ID.',
     parameters: {
       type: 'object',
@@ -288,6 +370,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'add_name_rule',
+    kind: 'write',
     description: 'Add a name rule that renames how transactions display.',
     parameters: {
       type: 'object',
@@ -304,6 +387,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_name_rule',
+    kind: 'write',
     description: 'Delete a name rule by ID.',
     parameters: {
       type: 'object',
@@ -315,6 +399,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'tag_transaction',
+    kind: 'write',
     description: 'Add or remove a tag on a transaction.',
     parameters: {
       type: 'object',
@@ -328,6 +413,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'toggle_hidden_category',
+    kind: 'write',
     description: 'Add or remove a category from the hidden list. Hidden categories are excluded from all totals.',
     parameters: {
       type: 'object',
@@ -340,11 +426,13 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'sync',
+    kind: 'write',
     description: 'Sync latest transactions from Plaid for all connected accounts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'show_canvas',
+    kind: 'write',
     description: 'Render a CanvasSpec in the app\'s Canvas screen (screen 9) and save it to history. The TUI auto-navigates to canvas. Always pass the original user prompt so the canvas is findable later.',
     parameters: {
       type: 'object',
@@ -357,11 +445,13 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_screen',
+    kind: 'read',
     description: 'Return the current text content of the TUI exactly as the user sees it. Use this to understand what screen the user is on and what is displayed before navigating or generating canvases.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_canvases',
+    kind: 'read',
     description: 'List previously generated canvases from history. Optionally filter by title or prompt text.',
     parameters: {
       type: 'object',
@@ -372,6 +462,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'load_canvas',
+    kind: 'write',
     description: 'Load a previously generated canvas from history and display it on screen 9.',
     parameters: {
       type: 'object',
@@ -383,6 +474,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_canvas',
+    kind: 'write',
     description: 'Delete a canvas from history by ID.',
     parameters: {
       type: 'object',
@@ -393,6 +485,8 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
 ];
+
+registerToolKinds(TOOL_DEFS);
 
 // ─── Human-readable write tool descriptions (for confirmation prompts) ─────────
 
@@ -473,15 +567,18 @@ function describeToolCallBody(name: string, input: Record<string, unknown>): str
       // write the agent was talked into by text arriving through the bank feed —
       // a merchant name reaches the model unescaped. Returning the bare tool name
       // asked the owner to approve something they could not see, which is not
-      // consent. A write tool nobody has written a description for must be
-      // refused, not waved through with a label.
-      if (WRITE_TOOLS.has(name)) {
-        throw new Error(
-          `Refusing to confirm "${name}": no description exists for this write tool, ` +
-            'so the owner cannot see what they would be approving. Add a case to describeToolCall().',
-        );
-      }
-      return name;
+      // consent.
+      //
+      // Read is the only kind that passes: this used to refuse only names in a
+      // hand-maintained WRITE_TOOLS set, so an unlisted write tool — or any
+      // name at all — came back as its own description. What is refused now is
+      // everything that is not a tool this app defines as a read.
+      if (toolKind(name) === 'read') return name;
+      throw new Error(
+        `Refusing to confirm "${name}": no description exists for it, so the owner ` +
+          'cannot see what they would be approving. Every tool in TOOL_DEFS is ' +
+          'classified read or write; a write needs an arm in describeToolCall().',
+      );
   }
 }
 
@@ -1081,6 +1178,6 @@ async function executeToolImpl(
 
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
   const result = await executeToolImpl(name, input);
-  if (WRITE_TOOLS.has(name)) notifyChange();
+  if (isWriteTool(name)) notifyChange();
   return result;
 }
