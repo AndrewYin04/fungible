@@ -410,8 +410,33 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
     case 'tag_transaction':        return `${input['add'] ? 'Add' : 'Remove'} tag #${s('tag')} on transaction [id: ${s('id')}]`;
     case 'toggle_hidden_category': return `${input['hide'] ? 'Hide' : 'Unhide'} category "${s('category')}"`;
     case 'sync':                   return 'Sync transactions from Plaid';
-    default:                       return name;
+    // The canvas tools write content the owner then reads on their own screen, so
+    // what that content IS is the whole question. `show_canvas` was previously
+    // confirmed as the bare word "show_canvas" with no arguments shown.
+    case 'show_canvas':            return `Show a canvas titled "${clip(s('title'), 60)}" (${n('length') || s('markdown').length} characters of content)`;
+    case 'load_canvas':            return `Open saved canvas #${n('id')}${input['title'] ? ` ("${clip(s('title'), 60)}")` : ''}`;
+    case 'delete_canvas':          return `Delete saved canvas #${n('id')}${input['title'] ? ` ("${clip(s('title'), 60)}")` : ''}`;
+    default:
+      // FAIL CLOSED. This gate is the only thing standing between the owner and a
+      // write the agent was talked into by text arriving through the bank feed —
+      // a merchant name reaches the model unescaped. Returning the bare tool name
+      // asked the owner to approve something they could not see, which is not
+      // consent. A write tool nobody has written a description for must be
+      // refused, not waved through with a label.
+      if (WRITE_TOOLS.has(name)) {
+        throw new Error(
+          `Refusing to confirm "${name}": no description exists for this write tool, ` +
+            'so the owner cannot see what they would be approving. Add a case to describeToolCall().',
+        );
+      }
+      return name;
   }
+}
+
+/** Trim a string for display, so an injected wall of text cannot bury the prompt. */
+function clip(value: string, max: number): string {
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
 // ─── Pure tool executor ───────────────────────────────────────────────────────
