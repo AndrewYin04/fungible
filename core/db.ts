@@ -3,19 +3,25 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { encryptToken } from './crypto.js';
 import { DATA_DIR } from './paths.js';
-import { ensureSecureDir, secureFile, touchSecureFile } from './fs-perms.js';
+import { ensureSecureDir, secureExistingTree, touchSecureFile } from './fs-perms.js';
 
 const DB_PATH = path.join(DATA_DIR, 'fungible.db');
 
+// Every entry point (tui/index.tsx, api/server.ts, mcp/server.ts,
+// gui/main/app.ts) imports this module, so this is the app's one startup
+// tighten. It applies the policy to the whole of DATA_DIR rather than to the
+// names this module happens to know: the database, its -wal/-shm/-journal
+// sidecars, the backups, `key`, both canvas files, screen.txt, gui-window.json
+// and anything a later version adds. Naming them one at a time is what left
+// `key` — the AES key for the stored Plaid access tokens — at 0644 on every
+// upgraded install while .env and the database were being fixed.
+ensureSecureDir(DATA_DIR);
+secureExistingTree(DATA_DIR);
 // The database holds every transaction, balance and account mask in plaintext.
 // SQLite creates its file 0644 regardless of umask, so pre-create it 0600 and
 // hand SQLite an existing (empty, therefore valid) database to open; SQLite
-// copies the main file's mode onto the -wal/-shm/-journal sidecars it derives.
-// An install from an earlier version is tightened in place.
-ensureSecureDir(DATA_DIR);
+// copies the main file's mode onto the sidecars it derives.
 touchSecureFile(DB_PATH);
-secureFile(DB_PATH);
-for (const sidecar of ['-wal', '-shm', '-journal']) secureFile(DB_PATH + sidecar);
 
 export const db: Client = createClient({ url: `file:${DB_PATH}` });
 

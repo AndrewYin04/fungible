@@ -77,6 +77,50 @@ function secureExisting(target: string, want: number): { changed: boolean; previ
 }
 
 /**
+ * Re-apply the policy to everything already inside `dir`: every regular file to
+ * 0600 and every subdirectory to 0700, at any depth. `dir` itself is left to
+ * ensureSecureDir, which is what creates it. Returns the paths it changed.
+ *
+ * DATA_DIR, not a list of file names, is the unit this policy applies to. The
+ * per-name version of the startup tighten fixed .env, fungible.db and the
+ * backups and missed everything else the app writes there — `key` (the AES key
+ * that decrypts the stored Plaid access tokens), canvas-history.json,
+ * canvas-spec.json, gui-window.json and profile.json all stayed 0644 on an
+ * upgraded install. A list is only ever as current as the last person who
+ * remembered to add to it, and the file it misses is world-readable until
+ * someone notices.
+ *
+ * Symlinks are skipped, not followed: chmod() acts on the link's target, so a
+ * link planted in DATA_DIR would aim the chmod at a file outside it. Skipping
+ * them also makes the walk cycle-free. Anything that is neither a regular file
+ * nor a directory is left alone — the app writes neither.
+ *
+ * Best effort, like the rest of this module: an entry that cannot be chmodded
+ * warns (via secureExisting) and the walk continues, so a startup path can call
+ * this unconditionally.
+ */
+export function secureExistingTree(dir: string): { changed: string[] } {
+  const changed: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return { changed }; // missing or unreadable — nothing of ours to tighten
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      if (secureExisting(full, DATA_DIR_MODE).changed) changed.push(full);
+      changed.push(...secureExistingTree(full).changed);
+    } else if (entry.isFile()) {
+      if (secureExisting(full, SECRET_FILE_MODE).changed) changed.push(full);
+    }
+  }
+  return { changed };
+}
+
+/**
  * Create an empty file 0600 if it does not exist yet, so that a program which
  * creates it itself with a laxer mode (SQLite uses 0644) opens ours instead.
  * Returns true when the file was created by this call.

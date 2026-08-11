@@ -17,6 +17,7 @@ import {
   DATA_DIR_MODE,
   SECRET_FILE_MODE,
   ensureSecureDir,
+  secureExistingTree,
   secureFile,
   touchSecureFile,
   writeSecretFileSync,
@@ -101,6 +102,127 @@ describe('fs-perms helpers', () => {
     writeSecretFileSync(file, 'new');
     expect(fs.readFileSync(file, 'utf8')).toBe('new');
     expect(modeOf(file)).toBe(SECRET_FILE_MODE);
+  });
+
+  it('secureExistingTree tightens files and directories at every depth', () => {
+    const dir = caseDir('tree');
+    fs.mkdirSync(path.join(dir, 'backups', 'deeper'), { recursive: true });
+    const files = ['loose', path.join('backups', 'a.bak'), path.join('backups', 'deeper', 'b')];
+    for (const rel of files) fs.writeFileSync(path.join(dir, rel), 'x', { mode: 0o644 });
+    for (const rel of files) fs.chmodSync(path.join(dir, rel), 0o644);
+    fs.chmodSync(path.join(dir, 'backups', 'deeper'), 0o755);
+    fs.chmodSync(path.join(dir, 'backups'), 0o755);
+
+    const { changed } = secureExistingTree(dir);
+
+    for (const rel of files) expect(modeOf(path.join(dir, rel))).toBe(SECRET_FILE_MODE);
+    expect(modeOf(path.join(dir, 'backups'))).toBe(DATA_DIR_MODE);
+    expect(modeOf(path.join(dir, 'backups', 'deeper'))).toBe(DATA_DIR_MODE);
+    expect(changed.length).toBe(5); // three files, two directories
+    // Idempotent: a second pass finds nothing left to change.
+    expect(secureExistingTree(dir).changed).toEqual([]);
+  });
+
+  it('secureExistingTree does not chmod through a symlink', () => {
+    const dir = caseDir('tree-symlink');
+    ensureSecureDir(dir);
+    const outsider = path.join(ROOT, `outsider-${caseNo}`);
+    fs.writeFileSync(outsider, 'not ours', { mode: 0o644 });
+    fs.chmodSync(outsider, 0o644);
+    fs.symlinkSync(outsider, path.join(dir, 'link'));
+
+    secureExistingTree(dir);
+
+    // chmod() acts on the target, so following the link would re-mode a file
+    // outside DATA_DIR that the app does not own.
+    expect(modeOf(outsider)).toBe(0o644);
+  });
+
+  it('secureExistingTree is a no-op on a directory that does not exist', () => {
+    expect(secureExistingTree(path.join(ROOT, 'never-created')).changed).toEqual([]);
+  });
+});
+
+/**
+ * Every file the app puts in DATA_DIR, at the mode an install from an earlier
+ * version leaves it. The list is derived from the writers, not from whatever the
+ * tighten path happens to enumerate — that is the whole point of the case below.
+ *
+ *   .env                  core/env-file.ts        PLAID_SECRET, LLM keys, FUNGIBLE_API_KEY
+ *   fungible.db (+wal/shm) core/db.ts             every transaction, balance and mask
+ *   backups/*.bak         core/backup.ts          full copies of the same database
+ *   key                   core/crypto.ts          decrypts the stored Plaid access tokens
+ *   canvas-history.json   core/canvas-history.ts  saved canvases and the prompts behind them
+ *   canvas-spec.json      core/canvas-history.ts  the canvas currently on screen
+ *   screen.txt            tui/screen-capture.ts   last rendered frame — balances in the clear
+ *   gui-window.json       gui/main/app.ts         window geometry
+ *   profile.json          legacy, read by the household migration in core/db.ts
+ */
+const LEGACY_DATA_DIR_FILES = [
+  '.env',
+  'fungible.db',
+  'fungible.db-wal',
+  'fungible.db-shm',
+  'key',
+  'canvas-history.json',
+  'canvas-spec.json',
+  'screen.txt',
+  'gui-window.json',
+  'profile.json',
+  path.join('backups', 'fungible.2026-01-03.bak'),
+];
+
+/** A DATA_DIR as an older version of the app left it: 0755 dirs, 0644 files. */
+function makeLegacyInstall(dir: string): void {
+  fs.mkdirSync(path.join(dir, 'backups'), { recursive: true });
+  for (const rel of LEGACY_DATA_DIR_FILES) {
+    fs.writeFileSync(path.join(dir, rel), '');
+    fs.chmodSync(path.join(dir, rel), 0o644);
+  }
+  fs.chmodSync(path.join(dir, 'backups'), 0o755);
+  fs.chmodSync(dir, 0o755);
+}
+
+describe('startup on an install left world-readable by an earlier version', () => {
+  /**
+   * Importing core/db.ts IS the startup path — every entry point (tui/index.tsx,
+   * api/server.ts, mcp/server.ts, gui/main/app.ts) pulls it in.
+   *
+   * Before this was fixed the tighten was a hand-maintained list of names, so it
+   * fixed .env, fungible.db and the backups and left `key` — the AES key that
+   * decrypts the stored Plaid access tokens — plus both canvas files, the GUI
+   * window state and profile.json at 0644, readable by every other account on
+   * the machine. A list of names is only ever as current as the last person who
+   * remembered to add to it.
+   */
+  it('tightens every file the app owns in DATA_DIR, not a list of names', async () => {
+    const dir = caseDir('legacy-install');
+    makeLegacyInstall(dir);
+
+    const { initDb } = await loadDbModules(dir);
+    await initDb();
+
+    expect(modeOf(dir)).toBe(DATA_DIR_MODE);
+    expect(modeOf(path.join(dir, 'backups'))).toBe(DATA_DIR_MODE);
+
+    const stillLoose = LEGACY_DATA_DIR_FILES
+      .filter((rel) => fs.existsSync(path.join(dir, rel)))
+      .filter((rel) => modeOf(path.join(dir, rel)) !== SECRET_FILE_MODE)
+      .map((rel) => `${rel} is ${modeOf(path.join(dir, rel)).toString(8)}`);
+    expect(stillLoose).toEqual([]);
+  });
+
+  it('tightens a file the app has never heard of, because DATA_DIR is the unit', async () => {
+    const dir = caseDir('legacy-unknown');
+    makeLegacyInstall(dir);
+    const future = path.join(dir, 'some-file-a-later-version-writes.json');
+    fs.writeFileSync(future, '{}');
+    fs.chmodSync(future, 0o644);
+
+    const { initDb } = await loadDbModules(dir);
+    await initDb();
+
+    expect(modeOf(future)).toBe(SECRET_FILE_MODE);
   });
 });
 
