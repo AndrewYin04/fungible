@@ -7,7 +7,21 @@ import path from 'node:path';
  * DATA_DIR holds the transaction database (every transaction, balance and
  * account mask in plaintext), its backups, the Plaid token encryption key, the
  * .env with PLAID_SECRET/LLM keys, and rendered screens. None of it is meant
- * for anyone but the owner, so: directories 0700, files 0600.
+ * for anyone but the owner. That is two rules, not one:
+ *
+ *   CREATING something: directories 0700, files 0600, applied in the same
+ *   syscall that creates them so they are never briefly world-readable.
+ *
+ *   TIGHTENING something that already exists: clear the group and other bits
+ *   and change nothing else. "No one but the owner can read this" is a
+ *   statement about the group and other bits; the owner's own bits are the
+ *   owner's business. Enforcing 0600 in both directions raised a file the owner
+ *   had deliberately made read-only (0444) to 0600, handing back a write
+ *   permission they had removed on purpose. Removing access is this app's call.
+ *   Granting it is not.
+ *
+ * Both rules give the same answer on every mode an upgrade actually produces:
+ * 0644 -> 0600, 0755 -> 0700, 0664 -> 0600.
  *
  * This module is the only place those numbers are defined; writers import from
  * here rather than passing their own mode (or none at all, which is how the db
@@ -16,6 +30,14 @@ import path from 'node:path';
 
 export const DATA_DIR_MODE = 0o700;
 export const SECRET_FILE_MODE = 0o600;
+
+/** The bits a tighten removes: group and other, all of them. */
+const SHARED_BITS = 0o077;
+
+/** What `mode` becomes once nobody but the owner can reach it. */
+function ownerOnly(mode: number): number {
+  return mode & ~SHARED_BITS;
+}
 
 function warn(target: string, mode: number, want: number, err: unknown): void {
   process.stderr.write(
@@ -26,8 +48,9 @@ function warn(target: string, mode: number, want: number, err: unknown): void {
 }
 
 /**
- * Create `dir` owner-only (0700) and tighten it if it already exists with
- * looser bits — an install made by an earlier version left it 0755/0775.
+ * Create `dir` owner-only (0700), or clear the group and other bits if it
+ * already exists with looser ones — an install made by an earlier version left
+ * it 0755/0775.
  *
  * The leaf is created with the mode in the same syscall, so it is never
  * briefly world-readable; parent directories are created with the default mode
@@ -45,20 +68,21 @@ export function ensureSecureDir(dir: string): { changed: boolean; previousMode?:
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
-  return secureExisting(dir, DATA_DIR_MODE);
+  return secureExisting(dir);
 }
 
 /**
- * Tighten an existing file to 0600. Files SQLite creates for us (the database
- * itself when it predates this version, `-wal`/`-shm`, and `VACUUM INTO`
- * backups) are born 0644; nothing else in the app revisits their mode.
- * Missing files are a no-op — the creator applies the mode instead.
+ * Clear the group and other bits on an existing file, so 0644 becomes 0600.
+ * Files SQLite creates for us (the database itself when it predates this
+ * version, `-wal`/`-shm`, and `VACUUM INTO` backups) are born 0644; nothing
+ * else in the app revisits their mode. Missing files are a no-op — the creator
+ * applies SECRET_FILE_MODE instead.
  */
 export function secureFile(file: string): { changed: boolean; previousMode?: number } {
-  return secureExisting(file, SECRET_FILE_MODE);
+  return secureExisting(file);
 }
 
-function secureExisting(target: string, want: number): { changed: boolean; previousMode?: number } {
+function secureExisting(target: string): { changed: boolean; previousMode?: number } {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(target);
@@ -66,6 +90,7 @@ function secureExisting(target: string, want: number): { changed: boolean; previ
     return { changed: false };
   }
   const mode = stat.mode & 0o777;
+  const want = ownerOnly(mode);
   if (mode === want) return { changed: false };
   try {
     fs.chmodSync(target, want);
@@ -77,9 +102,18 @@ function secureExisting(target: string, want: number): { changed: boolean; previ
 }
 
 /**
- * Re-apply the policy to everything already inside `dir`: every regular file to
- * 0600 and every subdirectory to 0700, at any depth. `dir` itself is left to
- * ensureSecureDir, which is what creates it. Returns the paths it changed.
+ * Re-apply the policy to everything already inside `dir`, at any depth: clear
+ * the group and other bits from every entry it may touch, and change nothing
+ * else — a 0644 file becomes 0600 and a 0755 subdirectory becomes 0700, while a
+ * file the owner made 0444 becomes 0400 and keeps their choice. `dir` itself is
+ * left to ensureSecureDir, which is what creates it. Returns the paths it
+ * changed, and the ones it deliberately did not.
+ *
+ * Every entry type is covered, not only regular files and directories: the app
+ * writes no FIFOs, sockets or device nodes, which is exactly why one found in
+ * DATA_DIR should not be left with its group and other bits — a FIFO planted
+ * here sat at prw-rw-r--, writable by every other account on the machine, and
+ * the walk said nothing about it.
  *
  * DATA_DIR, not a list of file names, is the unit this policy applies to. The
  * per-name version of the startup tighten fixed .env, fungible.db and the
@@ -132,26 +166,28 @@ export function secureExistingTree(dir: string): { changed: string[]; skipped: s
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      if (secureExisting(full, DATA_DIR_MODE).changed) changed.push(full);
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(full);
+    } catch {
+      continue; // vanished between readdir and here
+    }
+    if (stat.isSymbolicLink()) continue; // replaced by one in the meantime
+
+    if (stat.isDirectory()) {
+      if (secureExisting(full).changed) changed.push(full);
       const below = secureExistingTree(full);
       changed.push(...below.changed);
       skipped.push(...below.skipped);
-    } else if (entry.isFile()) {
-      let stat: fs.Stats;
-      try {
-        stat = fs.lstatSync(full);
-      } catch {
-        continue; // vanished between readdir and here
-      }
-      if (!stat.isFile()) continue; // replaced by something else in the meantime
-      if (stat.nlink > 1) {
-        skipped.push(full);
-        if ((stat.mode & 0o077) !== 0) warnHardLink(full, stat.mode & 0o777, stat.nlink);
-        continue;
-      }
-      if (secureExisting(full, SECRET_FILE_MODE).changed) changed.push(full);
+      continue;
     }
+    if (stat.nlink > 1) {
+      skipped.push(full);
+      if ((stat.mode & SHARED_BITS) !== 0) warnHardLink(full, stat.mode & 0o777, stat.nlink);
+      continue;
+    }
+    if (secureExisting(full).changed) changed.push(full);
   }
   return { changed, skipped };
 }

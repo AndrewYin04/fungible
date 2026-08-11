@@ -9,6 +9,7 @@
  * for an install left behind by an earlier version.
  */
 import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -177,6 +178,61 @@ describe('fs-perms helpers', () => {
     expect(modeOf(ours)).toBe(SECRET_FILE_MODE);
     expect(changed).toEqual([ours]);
     expect(skipped).toEqual([]);
+  });
+
+  /**
+   * The policy is "no one but the owner", which is about clearing the group and
+   * other bits. It was written as "set every file to exactly 0600", which also
+   * enforces the owner's own bits — so a file the owner had deliberately made
+   * read-only was measured going -r--r--r-- to -rw-------, handing back a write
+   * permission they had removed on purpose. Removing access is the app's call;
+   * granting it is not.
+   */
+  it('secureExistingTree clears group and other bits and adds nothing', () => {
+    const dir = caseDir('tree-never-adds');
+    ensureSecureDir(dir);
+    const cases: [string, number, number][] = [
+      // name           before  after
+      ['legacy.db',     0o644,  0o600], // the ordinary upgrade case
+      ['readonly.txt',  0o444,  0o400], // owner's read-only stays read-only
+      ['locked',        0o400,  0o400], // already owner-only: untouched
+      ['world.json',    0o666,  0o600],
+      ['exec.sh',       0o755,  0o700], // the owner's execute bit is theirs
+      ['none',          0o000,  0o000],
+    ];
+    for (const [name, before] of cases) {
+      fs.writeFileSync(path.join(dir, name), 'x');
+      fs.chmodSync(path.join(dir, name), before);
+    }
+
+    secureExistingTree(dir);
+
+    for (const [name, before, after] of cases) {
+      const got = modeOf(path.join(dir, name));
+      expect(got.toString(8), `${name} from ${before.toString(8)}`).toBe(after.toString(8));
+      expect(got & ~before, `${name} gained a permission bit`).toBe(0);
+      expect(got & 0o077, `${name} is still readable by someone else`).toBe(0);
+    }
+  });
+
+  /**
+   * The walk only looked at regular files and directories, so a FIFO planted in
+   * DATA_DIR sat at prw-rw-r-- — writable by every other account on the machine
+   * — and the walk said nothing about it. The app writes no FIFOs, sockets or
+   * device nodes, which is exactly why one found here should not keep its group
+   * and other bits.
+   */
+  it('secureExistingTree tightens an entry that is not a regular file', () => {
+    const dir = caseDir('tree-fifo');
+    ensureSecureDir(dir);
+    const fifo = path.join(dir, 'a-fifo');
+    execFileSync('mkfifo', ['-m', '664', fifo]);
+    expect(fs.lstatSync(fifo).isFIFO()).toBe(true);
+
+    const { changed } = secureExistingTree(dir);
+
+    expect(fs.lstatSync(fifo).mode & 0o777).toBe(0o600);
+    expect(changed).toEqual([fifo]);
   });
 
   it('secureExistingTree is a no-op on a directory that does not exist', () => {
