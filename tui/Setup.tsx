@@ -253,7 +253,10 @@ export function Setup() {
           <Text dimColor>Found in your Plaid dashboard under Team Settings → Keys</Text>
           <Box marginTop={1}>
             <Text>Client ID: </Text>
-            <TextInput value={clientId} color={C_WARNING} />
+            {/* Masked like the secret below: every rendered frame is mirrored to
+                DATA_DIR/screen.txt and served by the get_screen MCP tool, so a
+                credential shown in the clear here is readable from there. */}
+            <TextInput value={'*'.repeat(clientId.length)} color={C_WARNING} />
           </Box>
           <Text dimColor>Enter to continue · Esc back</Text>
         </Box>

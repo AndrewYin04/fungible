@@ -152,7 +152,7 @@ type ConfigField = {
 };
 
 const CONFIG_FIELDS: ConfigField[] = [
-  { key: 'PLAID_CLIENT_ID', label: 'Plaid Client ID', hint: 'Plaid dashboard → Team Settings → Keys' },
+  { key: 'PLAID_CLIENT_ID', label: 'Plaid Client ID', hint: 'Plaid dashboard → Team Settings → Keys', secret: true },
   { key: 'PLAID_SECRET', label: 'Plaid Secret', hint: 'Matches the selected Plaid environment', secret: true },
   { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', hint: 'Enables the agent (Claude)', secret: true },
   { key: 'OPENAI_API_KEY', label: 'OpenAI API Key', hint: 'Alternate agent provider', secret: true },
