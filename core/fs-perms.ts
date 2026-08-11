@@ -90,34 +90,79 @@ function secureExisting(target: string, want: number): { changed: boolean; previ
  * remembered to add to it, and the file it misses is world-readable until
  * someone notices.
  *
- * Symlinks are skipped, not followed: chmod() acts on the link's target, so a
- * link planted in DATA_DIR would aim the chmod at a file outside it. Skipping
- * them also makes the walk cycle-free. Anything that is neither a regular file
- * nor a directory is left alone — the app writes neither.
+ * What the walk will not chmod, and why:
+ *
+ *   Symlinks. chmod() acts on the link's target, so a link planted in DATA_DIR
+ *   would aim the mode at a file outside it. Skipping them also makes the walk
+ *   cycle-free.
+ *
+ *   Files with more than one name (st_nlink > 1). A hardlink is not a link as
+ *   far as readdir is concerned — it IS the file, under a second name — so it
+ *   was walked and chmodded, and the mode landed on every other name the inode
+ *   has, including names outside DATA_DIR. Nothing the app writes is ever
+ *   hardlinked, so an extra name means either something else made it (rsync
+ *   --link-dest, cp -al and borg-style backups all deduplicate by hardlinking)
+ *   or someone planted it; either way the other name is not ours to re-mode.
+ *   These are returned in `skipped` and warned about when they are actually
+ *   loose, because the walk is then leaving something group- or world-readable
+ *   inside DATA_DIR and the owner is the only one who can decide what to do
+ *   about it. Directories are exempt from this check — every directory has at
+ *   least two names ('.' and its entry in the parent) and cannot be hardlinked.
+ *
+ * What it does NOT cover: the mode is applied by path, so an entry replaced
+ * between the lstat and the chmod is still followed to whatever is there then.
+ * Closing that needs the chmod to go through a file descriptor opened
+ * O_NOFOLLOW, which is not portable to the Windows build. It requires write
+ * access to DATA_DIR, which is 0700 and owned by the owner, so anyone who can
+ * win the race can already read everything in it.
  *
  * Best effort, like the rest of this module: an entry that cannot be chmodded
  * warns (via secureExisting) and the walk continues, so a startup path can call
  * this unconditionally.
  */
-export function secureExistingTree(dir: string): { changed: string[] } {
+export function secureExistingTree(dir: string): { changed: string[]; skipped: string[] } {
   const changed: string[] = [];
+  const skipped: string[] = [];
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return { changed }; // missing or unreadable — nothing of ours to tighten
+    return { changed, skipped }; // missing or unreadable — nothing of ours to tighten
   }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       if (secureExisting(full, DATA_DIR_MODE).changed) changed.push(full);
-      changed.push(...secureExistingTree(full).changed);
+      const below = secureExistingTree(full);
+      changed.push(...below.changed);
+      skipped.push(...below.skipped);
     } else if (entry.isFile()) {
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(full);
+      } catch {
+        continue; // vanished between readdir and here
+      }
+      if (!stat.isFile()) continue; // replaced by something else in the meantime
+      if (stat.nlink > 1) {
+        skipped.push(full);
+        if ((stat.mode & 0o077) !== 0) warnHardLink(full, stat.mode & 0o777, stat.nlink);
+        continue;
+      }
       if (secureExisting(full, SECRET_FILE_MODE).changed) changed.push(full);
     }
   }
-  return { changed };
+  return { changed, skipped };
+}
+
+function warnHardLink(target: string, mode: number, nlink: number): void {
+  process.stderr.write(
+    `[fungible] warning: ${target} is mode ${mode.toString(8)} and has ${nlink} names, ` +
+    'so tightening it here would change the mode of a file that may be outside your ' +
+    'data directory. Leaving it as it is — check what else points at it ' +
+    `(find / -samefile ${target}) and tighten it yourself if it is yours.\n`,
+  );
 }
 
 /**

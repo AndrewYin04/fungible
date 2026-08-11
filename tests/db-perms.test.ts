@@ -138,6 +138,47 @@ describe('fs-perms helpers', () => {
     expect(modeOf(outsider)).toBe(0o644);
   });
 
+  /**
+   * A symlink is skipped because chmod() acts on its target. A HARDLINK is not
+   * a link as far as readdir is concerned — it is the file, under a second
+   * name — so it was walked and chmodded, and the mode landed on whatever else
+   * that inode is called. Measured before the fix, with a hardlink planted in
+   * DATA_DIR: outside-secret.txt went 644 -> 600.
+   *
+   * Nothing the app writes is ever hardlinked, so an extra name means either
+   * something else made it (rsync --link-dest, cp -al and borg-style backups
+   * all deduplicate by hardlinking) or someone planted it. Either way the other
+   * name is not ours to re-mode.
+   */
+  it('secureExistingTree does not chmod through a hardlink', () => {
+    const dir = caseDir('tree-hardlink');
+    ensureSecureDir(dir);
+    const outsider = path.join(ROOT, `outside-secret-${caseNo}.txt`);
+    fs.writeFileSync(outsider, 'not ours', { mode: 0o644 });
+    fs.chmodSync(outsider, 0o644);
+    fs.linkSync(outsider, path.join(dir, 'planted-link'));
+
+    const { changed, skipped } = secureExistingTree(dir);
+
+    expect(modeOf(outsider)).toBe(0o644);
+    expect(changed).toEqual([]);
+    expect(skipped).toEqual([path.join(dir, 'planted-link')]);
+  });
+
+  it('secureExistingTree still tightens a file that only has one name', () => {
+    const dir = caseDir('tree-onelink');
+    ensureSecureDir(dir);
+    const ours = path.join(dir, 'fungible.db');
+    fs.writeFileSync(ours, 'x', { mode: 0o644 });
+    fs.chmodSync(ours, 0o644);
+
+    const { changed, skipped } = secureExistingTree(dir);
+
+    expect(modeOf(ours)).toBe(SECRET_FILE_MODE);
+    expect(changed).toEqual([ours]);
+    expect(skipped).toEqual([]);
+  });
+
   it('secureExistingTree is a no-op on a directory that does not exist', () => {
     expect(secureExistingTree(path.join(ROOT, 'never-created')).changed).toEqual([]);
   });
