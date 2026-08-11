@@ -99,6 +99,42 @@ const GENERATE_CANVAS_TOOL: ToolDef = {
 
 const AGENT_TOOL_DEFS: ToolDef[] = [...TOOL_DEFS, SHOW_TOOL, GENERATE_CANVAS_TOOL];
 
+// ─── Describing a tool call to the owner ──────────────────────────────────────
+
+/**
+ * describeToolCall() throws for a write tool nobody has written a description
+ * for, rather than asking the owner to approve a bare tool name. That is
+ * correct and stays: a name you cannot read is not something you can consent to.
+ *
+ * What is not correct is letting the throw out of here. It fires while the
+ * assistant's message is still streaming — before any tool runs — so it escaped
+ * runAgentTurn entirely and took the whole turn with it: the streamed answer,
+ * every other tool call in the same message, and the turn's history, which both
+ * front ends roll back on an exception (tui/Chat.tsx, gui/main/agent-ipc.ts).
+ * One undescribed tool would have ended the conversation instead of being
+ * refused.
+ *
+ * So a description that cannot be produced becomes a refusal the owner reads
+ * and the model is told about, and dispatchTool never runs that call.
+ */
+type Description =
+  | { ok: true;  ownerText: string }
+  | { ok: false; ownerText: string; reason: string };
+
+function describeForOwner(name: string, input: Record<string, unknown>): Description {
+  try {
+    return { ok: true, ownerText: describeToolCall(name, input) };
+  } catch (err) {
+    // Front matter first: this is truncated to one line in both front ends, so
+    // the verdict and the tool name have to survive the clip.
+    return {
+      ok: false,
+      ownerText: `Refused "${name}": it cannot be confirmed — no description exists for this write tool`,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // ─── Tool dispatch (agent layer: show + confirmation wrapper) ──────────────────
 
 async function dispatchTool(
@@ -133,7 +169,12 @@ async function dispatchTool(
 
   // Write tools — confirm before executing
   if (WRITE_TOOLS.has(name)) {
-    const confirmed = await callbacks.onConfirm(describeToolCall(name, input));
+    const described = describeForOwner(name, input);
+    // Nothing to ask. Putting an undescribable write in front of the owner as a
+    // yes/no is the failure this gate exists to prevent, so refuse it outright
+    // and tell the model why rather than executing or prompting.
+    if (!described.ok) return `Refused: ${described.reason}`;
+    const confirmed = await callbacks.onConfirm(described.ownerText);
     if (!confirmed) return 'Cancelled.';
   }
 
@@ -166,7 +207,9 @@ export async function runAgentTurn(
         callbacks.onText(chunk.delta);
       } else if (chunk.type === 'tool_use') {
         if (chunk.name !== 'show') {
-          callbacks.onToolCall(chunk.name, describeToolCall(chunk.name, chunk.input));
+          // Never a bare describeToolCall() here: this runs mid-stream, so a
+          // throw would end the turn instead of refusing the one call.
+          callbacks.onToolCall(chunk.name, describeForOwner(chunk.name, chunk.input).ownerText);
         }
         currentBlocks.push({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input });
       }
