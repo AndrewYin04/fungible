@@ -65,6 +65,8 @@ Exposes your financial data to Claude via the [Model Context Protocol](https://m
 
 - **HTTP** — when the TUI is running, it starts an HTTP MCP server on port 3741 (`FUNGIBLE_MCP_PORT` to override). Point Claude at `http://localhost:3741/mcp` instead of using a command — writes are in-process so the TUI updates instantly. Only works while the TUI is open. The GUI does not start this; use stdio with the GUI.
 
+  This transport **requires the API key**, because it exposes the same 32 tools the REST API does and there is no reason for one door to be locked and the other open. The key is generated on first run and stored in `~/.fungible/.env` (mode 0600) as `FUNGIBLE_API_KEY`; read it with `grep FUNGIBLE_API_KEY ~/.fungible/.env`. stdio needs no key — a process that can spawn `fungible mcp` already has everything the key would protect.
+
 Config file location:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Linux / WSL:** `~/.config/Claude/claude_desktop_config.json`
@@ -98,7 +100,10 @@ Config file location:
 {
   "mcpServers": {
     "fungible": {
-      "url": "http://localhost:3741/mcp"
+      "url": "http://localhost:3741/mcp",
+      "headers": {
+        "Authorization": "Bearer PASTE_YOUR_FUNGIBLE_API_KEY_HERE"
+      }
     }
   }
 }
