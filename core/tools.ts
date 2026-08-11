@@ -411,11 +411,21 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
     case 'toggle_hidden_category': return `${input['hide'] ? 'Hide' : 'Unhide'} category "${s('category')}"`;
     case 'sync':                   return 'Sync transactions from Plaid';
     // The canvas tools write content the owner then reads on their own screen, so
-    // what that content IS is the whole question. `show_canvas` was previously
-    // confirmed as the bare word "show_canvas" with no arguments shown.
-    case 'show_canvas':            return `Show a canvas titled "${clip(s('title'), 60)}" (${n('length') || s('markdown').length} characters of content)`;
-    case 'load_canvas':            return `Open saved canvas #${n('id')}${input['title'] ? ` ("${clip(s('title'), 60)}")` : ''}`;
-    case 'delete_canvas':          return `Delete saved canvas #${n('id')}${input['title'] ? ` ("${clip(s('title'), 60)}")` : ''}`;
+    // what that content IS is the whole question. These were previously confirmed
+    // as the bare word "show_canvas" with no arguments shown.
+    //
+    // Read the parameters these tools ACTUALLY declare. A first cut of this arm
+    // invented `title`, `markdown` and a numeric `id`, and rendered
+    //     Show a canvas titled "" (0 characters of content)
+    //     Delete saved canvas #NaN
+    // — worse than the bare name, because it asserts things that are not true to
+    // someone deciding whether to approve a write. show_canvas takes
+    // {spec, prompt}; load_canvas and delete_canvas take a STRING id.
+    case 'show_canvas':
+      return `Render a canvas from the assistant's spec (${s('spec').length} characters)` +
+        (input['prompt'] ? ` for: "${clip(s('prompt'), 60)}"` : '');
+    case 'load_canvas':            return `Open saved canvas "${clip(s('id'), 40)}"`;
+    case 'delete_canvas':          return `Delete saved canvas "${clip(s('id'), 40)}"`;
     default:
       // FAIL CLOSED. This gate is the only thing standing between the owner and a
       // write the agent was talked into by text arriving through the bank feed —
