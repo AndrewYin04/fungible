@@ -73,16 +73,15 @@ function installAgentBridge() {
 
   (window as unknown as { __bridge: unknown }).__bridge = {
     call: async () => undefined,
-    invoke: async (channel: string, ...args: unknown[]) => {
-      if (channel === 'agent:provider') return 'anthropic/claude-test-model';
-      if (channel === 'agent:respond-confirm') {
-        const [id, yes] = args as [number, boolean];
+    agent: {
+      provider: async () => 'anthropic/claude-test-model',
+      reset: async () => undefined,
+      respondConfirm: async (id: number, yes: boolean) => {
         pendingConfirms.get(id)?.(yes);
         pendingConfirms.delete(id);
-        return undefined;
-      }
-      if (channel === 'agent:run') {
-        await runAgentTurn(args[0] as string, history, {
+      },
+      run: async (userMessage: string) => {
+        await runAgentTurn(userMessage, history, {
           onText: (delta) => emit('agent:text', delta),
           onToolCall: (name, desc) => emit('agent:tool', name, desc),
           onNavigate: (s, f) => emit('agent:navigate', s, f),
@@ -93,9 +92,7 @@ function installAgentBridge() {
               emit('agent:confirm', id, desc);
             }),
         });
-        return undefined;
-      }
-      return undefined;
+      },
     },
     on: (channel: string, cb: (...args: unknown[]) => void) => {
       if (!listeners.has(channel)) listeners.set(channel, new Set());
