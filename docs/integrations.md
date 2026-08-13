@@ -23,12 +23,35 @@ curl -X POST http://localhost:3456/tools/spending_summary \
   -d '{"year": 2026, "month": 5}'
 ```
 
+**Authentication is mandatory.** Every request needs the bearer token — there is
+no unauthenticated mode. On first start, if no `FUNGIBLE_API_KEY` is configured
+the server generates one and saves it to `~/.fungible/.env` (mode `0600`); read
+it from there:
+
+```bash
+grep '^FUNGIBLE_API_KEY=' ~/.fungible/.env
+```
+
+Requests are also refused unless they look like local, non-browser traffic:
+
+- the `Host` header must be loopback (`localhost`, `127.0.0.0/8`, `::1`) — this
+  is what stops a page on the internet from reaching the API by DNS rebinding,
+  or a machine on your LAN from reaching it if you bind a non-loopback address;
+- a request carrying an `Origin` or a `Sec-Fetch-Site` other than `none` is a
+  browser request and is refused (CSRF);
+- a request body must be declared `Content-Type: application/json`, so the
+  preflight-free "simple request" types (`text/plain`,
+  `application/x-www-form-urlencoded`, `multipart/form-data`) cannot reach a
+  tool. Bodies are capped at 1 MiB.
+
 **Configuration** (in `~/.fungible/.env`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FUNGIBLE_API_KEY` | _(none)_ | Bearer token required on all requests. If unset, auth is skipped (dev only). |
+| `FUNGIBLE_API_KEY` | _(generated on first run)_ | Bearer token required on **all** requests. Set it yourself to pin a value; otherwise one is generated and persisted. If it can be neither read nor written, the API refuses to start. |
 | `FUNGIBLE_API_PORT` | `3456` | Port to listen on. |
+| `FUNGIBLE_ALLOWED_HOSTS` | _(none)_ | Comma-separated extra `Host` values to accept beyond loopback, e.g. `fungible.local`. Only needed if you also set `FUNGIBLE_BIND_HOST`. |
+| `FUNGIBLE_ALLOWED_ORIGINS` | _(none)_ | Comma-separated browser origins allowed to call the API. Empty means no browser may. |
 
 Available tools: same set as the MCP server below.
 
@@ -41,6 +64,8 @@ Exposes your financial data to Claude via the [Model Context Protocol](https://m
 - **stdio** — Claude Desktop spawns `fungible mcp` as a child process. Always works, even when the TUI isn't open. When the TUI is running, writes notify it automatically so the UI refreshes. Use this if you're not sure which to pick.
 
 - **HTTP** — when the TUI is running, it starts an HTTP MCP server on port 3741 (`FUNGIBLE_MCP_PORT` to override). Point Claude at `http://localhost:3741/mcp` instead of using a command — writes are in-process so the TUI updates instantly. Only works while the TUI is open. The GUI does not start this; use stdio with the GUI.
+
+  This transport **requires the API key**, because it exposes the same 32 tools the REST API does and there is no reason for one door to be locked and the other open. The key is generated on first run and stored in `~/.fungible/.env` (mode 0600) as `FUNGIBLE_API_KEY`; read it with `grep FUNGIBLE_API_KEY ~/.fungible/.env`. stdio needs no key — a process that can spawn `fungible mcp` already has everything the key would protect.
 
 Config file location:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -75,7 +100,10 @@ Config file location:
 {
   "mcpServers": {
     "fungible": {
-      "url": "http://localhost:3741/mcp"
+      "url": "http://localhost:3741/mcp",
+      "headers": {
+        "Authorization": "Bearer PASTE_YOUR_FUNGIBLE_API_KEY_HERE"
+      }
     }
   }
 }

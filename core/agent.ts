@@ -5,9 +5,10 @@
 
 import 'dotenv/config';
 import { streamResponse, makeAssistantMessage, detectProvider, getProviderModel } from './llm-provider.js';
-import type { Message, ContentBlock, ToolDef } from './llm-provider.js';
+import type { Message, ContentBlock } from './llm-provider.js';
 import { APP_CONTEXT } from './agent-context.js';
-import { TOOL_DEFS, WRITE_TOOLS, describeToolCall, executeTool } from './tools.js';
+import { TOOL_DEFS, describeToolCall, executeTool, registerToolKinds, toConfirmationLine, toolKind } from './tools.js';
+import type { ClassifiedToolDef } from './tools.js';
 import { loadCanvasContext } from './canvas-agent.js';
 import { buildPriorCanvasesSection } from './canvas-history.js';
 
@@ -18,7 +19,8 @@ export type AgentCallbacks = {
   onText: (delta: string) => void;
   /** Called when the agent starts executing a tool. */
   onToolCall: (name: string, humanDesc: string) => void;
-  /** Called when a write tool needs confirmation. Resolves true = proceed. */
+  /** Called for anything not classified read — a write, or a name this app
+   *  does not define. Resolves true = proceed. */
   onConfirm: (humanDesc: string) => Promise<boolean>;
   /** Called by the `show` tool to navigate the UI. */
   onNavigate: (screen: string, filter?: Record<string, string>) => void;
@@ -63,8 +65,11 @@ Model in use: ${model}
 
 // ─── Agent-only tool: `show` ──────────────────────────────────────────────────
 
-const SHOW_TOOL: ToolDef = {
+const SHOW_TOOL: ClassifiedToolDef = {
   name: 'show',
+  // Moves the UI to a screen the owner is already entitled to see and writes
+  // nothing, so it is never confirmed — dispatchTool handles it before the gate.
+  kind: 'read',
   description: 'Navigate the app UI to display a specific screen or filtered view. Use this to show the user relevant data visually. For "canvas", pass the generated CanvasSpec as a JSON string in canvasSpec.',
   parameters: {
     type: 'object',
@@ -85,8 +90,11 @@ const SHOW_TOOL: ToolDef = {
   },
 };
 
-const GENERATE_CANVAS_TOOL: ToolDef = {
+const GENERATE_CANVAS_TOOL: ClassifiedToolDef = {
   name: 'generate_canvas',
+  // Loads context for the model and returns it as text. The canvas it leads to
+  // is written by show_canvas, which is the write and is confirmed.
+  kind: 'read',
   description: 'Load live financial data and the canvas schema. Returns context needed to build a CanvasSpec — including any prior canvases that cover a similar problem, so you can build on them rather than starting from scratch. After calling this, generate the CanvasSpec JSON following the returned instructions, then call show_canvas({ spec: JSON.stringify(spec), prompt: "<original user question>" }) to render and save it.',
   parameters: {
     type: 'object',
@@ -97,7 +105,53 @@ const GENERATE_CANVAS_TOOL: ToolDef = {
   },
 };
 
-const AGENT_TOOL_DEFS: ToolDef[] = [...TOOL_DEFS, SHOW_TOOL, GENERATE_CANVAS_TOOL];
+const AGENT_TOOL_DEFS: ClassifiedToolDef[] = [...TOOL_DEFS, SHOW_TOOL, GENERATE_CANVAS_TOOL];
+
+// The two tools above are the only ones the model can call that are not in
+// TOOL_DEFS, so they are the only ones core/tools.ts has not already recorded.
+// Registering them here is what stops the gate below refusing them as unknown —
+// and what makes adding a third one without a kind a compile error.
+registerToolKinds(AGENT_TOOL_DEFS);
+
+// ─── Describing a tool call to the owner ──────────────────────────────────────
+
+/**
+ * describeToolCall() throws for a write tool nobody has written a description
+ * for, rather than asking the owner to approve a bare tool name. That is
+ * correct and stays: a name you cannot read is not something you can consent to.
+ *
+ * What is not correct is letting the throw out of here. It fires while the
+ * assistant's message is still streaming — before any tool runs — so it escaped
+ * runAgentTurn entirely and took the whole turn with it: the streamed answer,
+ * every other tool call in the same message, and the turn's history, which both
+ * front ends roll back on an exception (tui/Chat.tsx, gui/main/agent-ipc.ts).
+ * One undescribed tool would have ended the conversation instead of being
+ * refused.
+ *
+ * So a description that cannot be produced becomes a refusal the owner reads
+ * and the model is told about, and dispatchTool never runs that call.
+ */
+type Description =
+  | { ok: true;  ownerText: string }
+  | { ok: false; ownerText: string; reason: string };
+
+function describeForOwner(name: string, input: Record<string, unknown>): Description {
+  try {
+    return { ok: true, ownerText: describeToolCall(name, input) };
+  } catch (err) {
+    // Front matter first: each front end fits this to its own window, so the
+    // verdict and the tool name have to survive the clip. `name` came off the
+    // model like every other value in a confirmation, so it goes through the
+    // same one-line bound rather than being trusted to be a plain identifier.
+    return {
+      ok: false,
+      ownerText: toConfirmationLine(
+        `Refused "${name}": it cannot be confirmed — no description exists for this tool`,
+      ),
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
 
 // ─── Tool dispatch (agent layer: show + confirmation wrapper) ──────────────────
 
@@ -131,9 +185,18 @@ async function dispatchTool(
     return `Navigated to ${screen}`;
   }
 
-  // Write tools — confirm before executing
-  if (WRITE_TOOLS.has(name)) {
-    const confirmed = await callbacks.onConfirm(describeToolCall(name, input));
+  // Everything that is not a known read is put to the owner. Not "everything on
+  // a list of write tools": that list was hand-maintained, and a tool missing
+  // from it was executed with no confirmation and no refusal. A name this app
+  // does not define reaches describeForOwner, which cannot describe it, so it
+  // is refused below rather than run.
+  if (toolKind(name) !== 'read') {
+    const described = describeForOwner(name, input);
+    // Nothing to ask. Putting an undescribable write in front of the owner as a
+    // yes/no is the failure this gate exists to prevent, so refuse it outright
+    // and tell the model why rather than executing or prompting.
+    if (!described.ok) return `Refused: ${described.reason}`;
+    const confirmed = await callbacks.onConfirm(described.ownerText);
     if (!confirmed) return 'Cancelled.';
   }
 
@@ -166,7 +229,9 @@ export async function runAgentTurn(
         callbacks.onText(chunk.delta);
       } else if (chunk.type === 'tool_use') {
         if (chunk.name !== 'show') {
-          callbacks.onToolCall(chunk.name, describeToolCall(chunk.name, chunk.input));
+          // Never a bare describeToolCall() here: this runs mid-stream, so a
+          // throw would end the turn instead of refusing the one call.
+          callbacks.onToolCall(chunk.name, describeForOwner(chunk.name, chunk.input).ownerText);
         }
         currentBlocks.push({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input });
       }

@@ -254,12 +254,18 @@ export function Chat({
         </Box>
       ) : null}
 
-      {/* Confirmation prompt */}
+      {/* Confirmation prompt. The description arrives as one bounded line
+          (core/tools.ts describeToolCall) and is fitted to the real terminal
+          width here: ink truncates to the space left beside the ⚠, so however
+          long the line is, [y]/[n] stays on the row directly below the text it
+          belongs to. Wrapping it instead let a tool argument choose how many
+          rows sat above the y/n, which is how a fabricated "already approved"
+          sentence got laid out like app output. */}
       {confirm && (
         <Box flexDirection="column">
           <Box>
             <Text color={C_WARNING}>⚠ </Text>
-            <Text>{confirm.description}</Text>
+            <Text wrap="truncate-end">{confirm.description}</Text>
           </Box>
           <Box gap={3}>
             <Text color={C_POSITIVE}>[y] confirm</Text>

@@ -34,7 +34,12 @@ export function installBridge(): BridgeHarness {
       if (typeof f !== 'function') throw new Error(`Unknown bridge call: ${ns}.${fn}`);
       return f(...args);
     },
-    invoke: async (channel: string) => (channel === 'agent:provider' ? null : undefined),
+    agent: {
+      provider: async () => null,
+      run: async () => undefined,
+      reset: async () => undefined,
+      respondConfirm: async () => undefined,
+    },
     on: (channel: string, cb: (...args: unknown[]) => void) => {
       if (!listeners.has(channel)) listeners.set(channel, new Set());
       listeners.get(channel)!.add(cb);

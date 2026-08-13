@@ -40,7 +40,7 @@ export function ChatDrawer() {
   }
 
   useEffect(() => {
-    void window.__bridge.invoke('agent:provider').then((p) => setProvider(p as string | null));
+    void window.__bridge.agent.provider().then((p) => setProvider(p as string | null));
 
     const offs = [
       window.__bridge.on('agent:text', (...args) => {
@@ -112,7 +112,7 @@ export function ChatDrawer() {
     setStreaming(true);
     streamRef.current = '';
     try {
-      await window.__bridge.invoke('agent:run', text);
+      await window.__bridge.agent.run(text);
       if (streamRef.current.trim()) addMsg({ role: 'assistant', text: streamRef.current });
     } catch (e) {
       addMsg({ role: 'error', text: `Error: ${e instanceof Error ? e.message : String(e)}` });
@@ -127,7 +127,7 @@ export function ChatDrawer() {
   function answerConfirm(yes: boolean) {
     if (!confirm) return;
     addMsg({ role: 'tool', text: yes ? `✓ ${confirm.description}` : '✗ Cancelled' });
-    void window.__bridge.invoke('agent:respond-confirm', confirm.id, yes);
+    void window.__bridge.agent.respondConfirm(confirm.id, yes);
     setConfirm(null);
   }
 
@@ -152,7 +152,7 @@ export function ChatDrawer() {
             <button
               className={styles.headerBtn}
               onClick={() => {
-                void window.__bridge.invoke('agent:reset');
+                void window.__bridge.agent.reset();
                 setMsgs([]);
               }}
             >

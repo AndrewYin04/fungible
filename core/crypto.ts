@@ -1,17 +1,22 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './paths.js';
+import { ensureSecureDir, secureFile, writeSecretFileSync } from './fs-perms.js';
 
 const KEY_PATH = path.join(DATA_DIR, 'key');
 const ALGORITHM = 'aes-256-gcm';
 
 function loadOrCreateKey(): Buffer {
   if (existsSync(KEY_PATH)) {
+    secureFile(KEY_PATH); // a key file from an earlier version may be 0644
     return Buffer.from(readFileSync(KEY_PATH, 'utf8').trim(), 'base64');
   }
   const key = randomBytes(32);
-  writeFileSync(KEY_PATH, key.toString('base64'), { mode: 0o600 });
+  // This key decrypts the stored Plaid access tokens: owner-only, and the mode
+  // is enforced after the write because writeFileSync only applies it on create.
+  ensureSecureDir(DATA_DIR);
+  writeSecretFileSync(KEY_PATH, key.toString('base64'));
   return key;
 }
 

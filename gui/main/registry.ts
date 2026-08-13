@@ -98,6 +98,30 @@ import type { CanvasSpec } from '../../core/canvas-spec.js';
 import { writeEnvFile, type EnvUpdates } from '../../core/env-file.js';
 import { readFileSync } from 'node:fs';
 
+/**
+ * The env keys the GUI's Configuration panel offers, and therefore the only
+ * ones a renderer call may set. Taken from CONFIG_FIELDS plus the Plaid
+ * environment select in gui/renderer/src/screens/Settings.tsx — the test in
+ * tests/gui/ipc-surface.test.ts compares this list against that file, so the
+ * two cannot drift apart.
+ *
+ * writeEnvFile itself takes any well-formed key: the TUI Setup wizard is a
+ * local program run by the owner, but the renderer is a browser context, and
+ * every key outside this list is one nobody using the app can ask for. The
+ * ones that matter: ANTHROPIC_BASE_URL / OPENAI_BASE_URL are read straight out
+ * of the environment by the LLM SDKs, so writing one sends the owner's
+ * financial context to whatever host it names; FUNGIBLE_BIND_HOST and
+ * FUNGIBLE_API_KEY decide who can reach the local API; FUNGIBLE_DATA_DIR moves
+ * the database itself.
+ */
+export const WRITABLE_ENV_KEYS = [
+  'PLAID_CLIENT_ID',
+  'PLAID_SECRET',
+  'PLAID_ENV',
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+] as const;
+
 // Explicit picks (no module spreads): keeps the IPC surface intentional and
 // excludes non-structured-cloneable exports like buildSearchRe.
 // Electron-free on purpose — tests import this without an electron runtime.
@@ -227,9 +251,29 @@ export const registry = {
     getLastSyncedAt,
   },
   config: {
-    writeEnv: async (updates: EnvUpdates): Promise<{ written: string[] }> => {
-      const { written } = writeEnvFile(updates);
-      return { written };
+    // A key given with an empty value REMOVES it from .env (core/env-file.ts).
+    // The renderer's Configuration panel says a blank field keeps the current
+    // value, so it does not send blank fields at all — both halves of that
+    // contract have to stay true, and `cleared` is reported rather than
+    // swallowed so a caller that does send one is not told "saved 0 values".
+    writeEnv: async (updates: EnvUpdates): Promise<{ written: string[]; cleared: string[] }> => {
+      if (updates === null || typeof updates !== 'object' || Array.isArray(updates)) {
+        throw new Error('config.writeEnv expects an object of env keys');
+      }
+      // Refuse the whole call, loudly, rather than dropping the unknown keys:
+      // a caller told "saved" while a key it asked for was ignored learns
+      // nothing, and the owner never sees that something asked for a key the
+      // panel does not offer.
+      const refused = Object.keys(updates).filter(
+        (k) => !(WRITABLE_ENV_KEYS as readonly string[]).includes(k),
+      );
+      if (refused.length > 0) {
+        throw new Error(
+          `config.writeEnv refused ${refused.join(', ')}: the Configuration panel sets only ${WRITABLE_ENV_KEYS.join(', ')}`,
+        );
+      }
+      const { written, cleared } = writeEnvFile(updates);
+      return { written, cleared };
     },
   },
   settings: {

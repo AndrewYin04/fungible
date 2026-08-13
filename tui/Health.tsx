@@ -5,9 +5,6 @@ import { fmt, fmtSigned, fmtPct, fmtMonths, fmtCompact, Divider } from './fmt.js
 import { handleNavKey } from './nav.js';
 import { loadHealthData, yearsToFire, coastYears, type HealthData } from '../core/health.js';
 import { getSetting, setSetting, PRETAX_MONTHLY_KEY } from '../core/settings.js';
-import { getCategoryDriftData } from '../core/queries.js';
-import { getDriftWindows, getPeriodStart } from '../core/dateUtils.js';
-import { bucketDrift, type Scorecard } from '../core/scorecard.js';
 import { C_POSITIVE, C_NEGATIVE, C_WARNING, C_NEUTRAL, C_ACCENT } from './ui.js';
 import { SectionHeader, PageHeader, DialRow } from './components/index.js';
 import { useRefreshKey } from './RefreshContext.js';
@@ -65,16 +62,6 @@ export function Health({ onNavigate, isActive, showHints }: { onNavigate: (s: Sc
     });
   }, [refreshKey]);
 
-  // Trailing-30-day scorecard: which categories drifted from typical recently.
-  const [scorecard, setScorecard] = useState<Scorecard | null>(null);
-  useEffect(() => {
-    const today = new Date();
-    const windows = getDriftWindows('last30', getPeriodStart('last30', today), today);
-    if (!windows) return;
-    const { current, lastPeriod, lastYear, rolling12 } = windows;
-    void getCategoryDriftData(current, lastPeriod, lastYear, rolling12)
-      .then((rows) => setScorecard(bucketDrift(rows)));
-  }, [refreshKey]);
   const [withdrawal, setWithdrawal]     = useState(DEFAULT_WITHDRAWAL);
   const [growth, setGrowth]             = useState(DEFAULT_GROWTH);
 
@@ -266,38 +253,6 @@ export function Health({ onNavigate, isActive, showHints }: { onNavigate: (s: Sc
           <Text dimColor>{fmt(data.liquid)} incl. brokerage</Text>
         </Box>
       </Box>
-
-      {/* ── Last 30 days scorecard strip ───────────────────────────────────── */}
-      {scorecard && (scorecard.over.length > 0 || scorecard.under.length > 0) && (
-        <Box flexDirection="column" marginTop={1}>
-          <SectionHeader>LAST 30 DAYS · VS TYPICAL</SectionHeader>
-          {scorecard.over.length > 0 && (
-            <Box gap={3} marginTop={1}>
-              <Text dimColor>{'Watch'.padEnd(L)}</Text>
-              <Text color={C_NEGATIVE}>
-                {scorecard.over.slice(0, 2).map((r) => `${r.category} ${fmtSigned(r.medianDelta, 0)}`).join('  ·  ')}
-              </Text>
-            </Box>
-          )}
-          {scorecard.under.length > 0 && (
-            <Box gap={3} marginTop={scorecard.over.length > 0 ? 0 : 1}>
-              <Text dimColor>{'Good'.padEnd(L)}</Text>
-              <Text color={C_POSITIVE}>
-                {[...scorecard.under]
-                  .sort((a, b) => a.medianDelta - b.medianDelta)
-                  .slice(0, 2)
-                  .map((r) => `${r.category} ${fmtSigned(r.medianDelta, 0)}`)
-                  .join('  ·  ')}
-              </Text>
-            </Box>
-          )}
-          <Box gap={3}>
-            <Text dimColor>{'Net'.padEnd(L)}</Text>
-            <Text bold color={scorecard.net <= 0 ? C_POSITIVE : C_WARNING}>{fmtSigned(scorecard.net, 0)}</Text>
-            <Text dimColor>[1] dashboard → [s] scorecard</Text>
-          </Box>
-        </Box>
-      )}
 
       {/* ── Debt (only shown if there is debt) ─────────────────────────────── */}
       {data.totalDebt > 0 && (

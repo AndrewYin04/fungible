@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, shell } from 'electron';
 import { join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { DATA_DIR } from '../../core/paths.js';
+import { writeSecretFileSync } from '../../core/fs-perms.js';
 import { initDb } from '../../core/db.js';
 import { backupDb } from '../../core/backup.js';
 import { rebuildDisplayNames } from '../../core/rename.js';
@@ -110,7 +111,9 @@ function createWindow() {
 
   win.on('close', () => {
     try {
-      writeFileSync(WINDOW_STATE_PATH, JSON.stringify(win.getNormalBounds()), 'utf-8');
+      // Through the policy helper, not a bare writeFileSync: this is the only
+      // writer in the app that was creating a DATA_DIR file at the umask's mode.
+      writeSecretFileSync(WINDOW_STATE_PATH, JSON.stringify(win.getNormalBounds()));
     } catch {
       /* non-fatal */
     }

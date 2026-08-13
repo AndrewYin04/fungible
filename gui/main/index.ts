@@ -1,4 +1,3 @@
-import { config } from 'dotenv';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -10,8 +9,10 @@ if (process.env.FUNGIBLE_DEMO) {
   process.env.FUNGIBLE_DATA_DIR = join(homedir(), '.fungible-demo');
 }
 
-const { DATA_DIR } = await import('../../core/paths.js');
+// Dynamic for the same reason: core/env-file.ts reads DATA_DIR at import time.
+const { loadEnvFile } = await import('../../core/env-file.js');
 
-config({ path: join(DATA_DIR, '.env'), quiet: true });
+// Loads the secrets file and re-tightens it to 0600 if anything loosened it.
+loadEnvFile({ quiet: true });
 
 await import('./app.js');

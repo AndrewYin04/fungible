@@ -7,10 +7,11 @@
  * embedded agent handles those before calling executeTool.
  */
 
-import { writeFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { notifyChange } from './refresh.js';
 import { DATA_DIR } from './paths.js';
+import { writeSecretFileSync } from './fs-perms.js';
 import { getRangeSummary, getMonthlySummary, getTagSummary, getCategoryDriftData, getMerchantSummary, getNetWorthHistory, getLinkedAccounts, type NetWorthGranularity, type CategoryDrift } from './queries.js';
 import { solveTVM } from './calculator.js';
 import { getDriftWindows, getPeriodStart, formatPeriodLabel } from './dateUtils.js';
@@ -30,24 +31,85 @@ import type { ToolDef } from './llm-provider.js';
 
 import { CANVAS_SPEC_PATH, appendHistory, searchHistory, getHistoryEntry, deleteHistoryEntry } from './canvas-history.js';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Tool classification ──────────────────────────────────────────────────────
 
-// Keep in sync with executeTool — any tool that mutates data must be listed here
-// or TUI refresh and afterWrite callbacks will be silently skipped for that tool.
-export const WRITE_TOOLS = new Set([
-  'edit_transaction', 'clear_edit', 'ignore_transaction',
-  'add_rule', 'delete_rule', 'add_name_rule', 'delete_name_rule',
-  'tag_transaction', 'toggle_hidden_category', 'sync',
-  'show_canvas', 'load_canvas', 'delete_canvas',
-]);
+/**
+ * What a tool does to the owner's data. `write` is confirmed before it runs and
+ * refreshes the UI afterwards; `read` is the only thing that runs unasked.
+ */
+export type ToolKind = 'read' | 'write';
+
+/**
+ * A tool definition plus its kind. `kind` is required, so a tool cannot be
+ * added to TOOL_DEFS without being classified — that is a compile error, not
+ * something a reviewer has to notice.
+ */
+export type ClassifiedToolDef = ToolDef & { kind: ToolKind };
+
+const TOOL_KINDS = new Map<string, ToolKind>();
+
+/**
+ * Record what each definition is, so the gates can ask the definitions instead
+ * of consulting a list of names.
+ *
+ * This replaced a hand-maintained `WRITE_TOOLS` set. Both gates keyed off it —
+ * the confirmation in core/agent.ts and the refusal in describeToolCall — so a
+ * write tool added to TOOL_DEFS and not added to the set was neither confirmed
+ * nor refused, just executed; and describeToolCall('wipe_everything', {})
+ * returned the bare string 'wipe_everything'. A list of names is only ever as
+ * current as the last person who remembered to add to it.
+ *
+ * Throws rather than defaulting: an unclassified tool is a bug in the source,
+ * and this runs at import, so every entry point (tui, gui, mcp, api) fails
+ * immediately and loudly rather than at the moment someone is asked to approve
+ * something nobody classified. TypeScript catches it first; this catches the
+ * definition that reached here from JavaScript or through a cast.
+ *
+ * Exported because core/agent.ts adds two tools of its own to the model's list
+ * (`show`, `generate_canvas`) that are not in TOOL_DEFS. Registering the same
+ * name twice with the same kind is fine — re-registering it with a different
+ * one is not.
+ */
+export function registerToolKinds(defs: readonly ClassifiedToolDef[]): void {
+  for (const def of defs) {
+    if (def.kind !== 'read' && def.kind !== 'write') {
+      throw new Error(
+        `Tool "${def.name}" is not classified: kind must be 'read' or 'write'. ` +
+          'Anything not classified read is put in front of the owner for approval, ' +
+          'and anything with no description is refused, so an unclassified tool ' +
+          'cannot be called at all.',
+      );
+    }
+    const previous = TOOL_KINDS.get(def.name);
+    if (previous !== undefined && previous !== def.kind) {
+      throw new Error(
+        `Tool "${def.name}" is registered as both ${previous} and ${def.kind}.`,
+      );
+    }
+    TOOL_KINDS.set(def.name, def.kind);
+  }
+}
+
+/** The kind of a registered tool, or undefined for a name nobody defined. */
+export function toolKind(name: string): ToolKind | undefined {
+  return TOOL_KINDS.get(name);
+}
+
+/** True only for a tool that is registered AND classified write. An unknown
+ *  name is not a write — it is nothing, and callers refuse it rather than
+ *  treating it as harmless. */
+export function isWriteTool(name: string): boolean {
+  return TOOL_KINDS.get(name) === 'write';
+}
 
 // ─── Tool definitions (all except the agent-only `show` tool) ─────────────────
 
-export const TOOL_DEFS: ToolDef[] = [
+export const TOOL_DEFS: ClassifiedToolDef[] = [
   // ── Data / read ────────────────────────────────────────────────────────────
 
   {
     name: 'spending_summary',
+    kind: 'read',
     description: 'Get income, expenses, net, and spending by category. Provide either (year + month) for a specific month, or (from + to) for a date range.',
     parameters: {
       type: 'object',
@@ -61,6 +123,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'merchant_summary',
+    kind: 'read',
     description: 'Get top merchants for a category in a date range, with total amount, transaction count, and share of category spend.',
     parameters: {
       type: 'object',
@@ -76,6 +139,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_transactions',
+    kind: 'read',
     description: 'List transactions with optional filters. Returns date, name, amount, category, account, and ID.',
     parameters: {
       type: 'object',
@@ -93,16 +157,19 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_accounts',
+    kind: 'read',
     description: 'List all connected accounts (banks, credit cards, manual assets).',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'get_balances',
+    kind: 'read',
     description: 'Get current balances for all accounts, plus net worth, total cash, and total liquid assets.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'get_financial_health',
+    kind: 'read',
     description: 'Get financial health metrics: cash and liquid runway months, FIRE number, progress, and estimated years to retirement.',
     parameters: {
       type: 'object',
@@ -114,6 +181,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_scorecard',
+    kind: 'read',
     description: 'Spending scorecard: which categories are significantly over or under the typical month (12-month median baseline), with per-category deltas and a net verdict. Use for "how am I doing lately / where did my spending go wrong". Defaults to the trailing 30 days, which is fully populated even early in a calendar month.',
     parameters: {
       type: 'object',
@@ -127,6 +195,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_trends',
+    kind: 'read',
     description: 'Month-by-month spending trends for the last N months. Optionally filter to a specific category.',
     parameters: {
       type: 'object',
@@ -138,26 +207,31 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'list_rules',
+    kind: 'read',
     description: 'List all category rules.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_name_rules',
+    kind: 'read',
     description: 'List all name rules (rules that rename transaction display names).',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_hidden_categories',
+    kind: 'read',
     description: 'List categories hidden from totals and charts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_tags',
+    kind: 'read',
     description: 'List all tags with transaction counts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'tag_summary',
+    kind: 'read',
     description: 'Get income, expenses, net, and category breakdown for all transactions with a given tag.',
     parameters: {
       type: 'object',
@@ -169,6 +243,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'uncategorized_summary',
+    kind: 'read',
     description: 'Show the most common uncategorized transaction names, useful for writing new rules.',
     parameters: {
       type: 'object',
@@ -179,6 +254,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_finance_guide',
+    kind: 'read',
     description: 'Get opinionated personal finance guidance. Omit topic for an overview; provide a topic for detailed advice.',
     parameters: {
       type: 'object',
@@ -193,6 +269,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_net_worth_history',
+    kind: 'read',
     description: 'Net worth over time, grouped by day, week, month, quarter, or year. Returns assets, liabilities, and net worth for each period.',
     parameters: {
       type: 'object',
@@ -207,6 +284,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'calculate_tvm',
+    kind: 'read',
     description: 'Time Value of Money solver. Provide any 4 of 5 variables (pv, fv, pmt, n, rate) and it solves for the missing one. Rate is the periodic rate (e.g. monthly rate = annual% / 1200). Sign convention: outflows negative, inflows positive.',
     parameters: {
       type: 'object',
@@ -224,6 +302,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: 'edit_transaction',
+    kind: 'write',
     description: 'Manually set the category for a specific transaction (pins it — survives re-syncs). Use list_transactions to get the ID.',
     parameters: {
       type: 'object',
@@ -236,6 +315,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'clear_edit',
+    kind: 'write',
     description: 'Remove a manual category override from a transaction, reverting to rule-based categorization.',
     parameters: {
       type: 'object',
@@ -247,6 +327,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'ignore_transaction',
+    kind: 'write',
     description: 'Toggle the ignored flag on a transaction. Ignored transactions are hidden from totals and charts.',
     parameters: {
       type: 'object',
@@ -259,6 +340,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'add_rule',
+    kind: 'write',
     description: 'Add a category rule and immediately apply it to all transactions.',
     parameters: {
       type: 'object',
@@ -276,6 +358,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_rule',
+    kind: 'write',
     description: 'Delete a category rule by ID. Use list_rules to find the ID.',
     parameters: {
       type: 'object',
@@ -287,6 +370,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'add_name_rule',
+    kind: 'write',
     description: 'Add a name rule that renames how transactions display.',
     parameters: {
       type: 'object',
@@ -303,6 +387,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_name_rule',
+    kind: 'write',
     description: 'Delete a name rule by ID.',
     parameters: {
       type: 'object',
@@ -314,6 +399,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'tag_transaction',
+    kind: 'write',
     description: 'Add or remove a tag on a transaction.',
     parameters: {
       type: 'object',
@@ -327,6 +413,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'toggle_hidden_category',
+    kind: 'write',
     description: 'Add or remove a category from the hidden list. Hidden categories are excluded from all totals.',
     parameters: {
       type: 'object',
@@ -339,11 +426,13 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'sync',
+    kind: 'write',
     description: 'Sync latest transactions from Plaid for all connected accounts.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'show_canvas',
+    kind: 'write',
     description: 'Render a CanvasSpec in the app\'s Canvas screen (screen 9) and save it to history. The TUI auto-navigates to canvas. Always pass the original user prompt so the canvas is findable later.',
     parameters: {
       type: 'object',
@@ -356,11 +445,13 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'get_screen',
+    kind: 'read',
     description: 'Return the current text content of the TUI exactly as the user sees it. Use this to understand what screen the user is on and what is displayed before navigating or generating canvases.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'list_canvases',
+    kind: 'read',
     description: 'List previously generated canvases from history. Optionally filter by title or prompt text.',
     parameters: {
       type: 'object',
@@ -371,6 +462,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'load_canvas',
+    kind: 'write',
     description: 'Load a previously generated canvas from history and display it on screen 9.',
     parameters: {
       type: 'object',
@@ -382,6 +474,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'delete_canvas',
+    kind: 'write',
     description: 'Delete a canvas from history by ID.',
     parameters: {
       type: 'object',
@@ -393,10 +486,54 @@ export const TOOL_DEFS: ToolDef[] = [
   },
 ];
 
+registerToolKinds(TOOL_DEFS);
+
 // ─── Human-readable write tool descriptions (for confirmation prompts) ─────────
 
+/**
+ * The longest confirmation line describeToolCall will return, and the longest
+ * single value it will interpolate into one.
+ *
+ * Both bounds exist because every value in a confirmation arrives from the
+ * model, and the model reads merchant names off the bank feed. The field bound
+ * is what keeps the SENTENCE readable — clipping the whole line instead would
+ * cut the tail off `… [id: 1]`, which is the part telling the owner which
+ * transaction they are about to change. The line bound is the backstop: it
+ * applies to whatever an arm returns, so no arm can be long by construction.
+ *
+ * Neither is a display width. A front end fits the line to its own window
+ * (tui/Chat.tsx truncates to the terminal column count); these say only that
+ * what it is handed is one line and finite.
+ */
+export const DESCRIPTION_MAX_CHARS = 160;
+const FIELD_MAX_CHARS = 40;
+
+/**
+ * The one line the owner reads before approving a write.
+ *
+ * Every return value goes through clip(), so the invariant is a property of
+ * this function rather than of each arm remembering: one line, no control or
+ * format characters, at most DESCRIPTION_MAX_CHARS long. An arm added later
+ * cannot reintroduce a multi-line confirmation, and neither can an input.
+ */
 export function describeToolCall(name: string, input: Record<string, unknown>): string {
-  const s = (k: string) => String(input[k] ?? '');
+  return clip(describeToolCallBody(name, input), DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Fit arbitrary text into the same single bounded line. core/agent.ts builds
+ * its refusal text around a tool NAME that also came from the model, so it
+ * needs the same treatment.
+ */
+export function toConfirmationLine(text: string): string {
+  return clip(text, DESCRIPTION_MAX_CHARS);
+}
+
+function describeToolCallBody(name: string, input: Record<string, unknown>): string {
+  /** Every model-supplied value an arm interpolates goes through here. */
+  const s = (k: string, max = FIELD_MAX_CHARS) => clip(String(input[k] ?? ''), max);
+  /** Unclipped — only for the arm that has to parse and measure its value. */
+  const raw = (k: string) => String(input[k] ?? '');
   const n = (k: string) => Number(input[k] ?? 0);
   switch (name) {
     case 'edit_transaction':       return `Set transaction category to "${s('category')}" [id: ${s('id')}]`;
@@ -409,8 +546,129 @@ export function describeToolCall(name: string, input: Record<string, unknown>): 
     case 'tag_transaction':        return `${input['add'] ? 'Add' : 'Remove'} tag #${s('tag')} on transaction [id: ${s('id')}]`;
     case 'toggle_hidden_category': return `${input['hide'] ? 'Hide' : 'Unhide'} category "${s('category')}"`;
     case 'sync':                   return 'Sync transactions from Plaid';
-    default:                       return name;
+    // The canvas tools write content the owner then reads on their own screen, so
+    // what that content IS is the whole question. These were previously confirmed
+    // as the bare word "show_canvas" with no arguments shown.
+    //
+    // Read the parameters these tools ACTUALLY declare. A first cut of this arm
+    // invented `title`, `markdown` and a numeric `id`, and rendered
+    //     Show a canvas titled "" (0 characters of content)
+    //     Delete saved canvas #NaN
+    // — worse than the bare name, because it asserts things that are not true to
+    // someone deciding whether to approve a write. show_canvas takes
+    // {spec, prompt}; load_canvas and delete_canvas take a STRING id.
+    case 'show_canvas':
+      return `Render ${describeCanvasSpec(raw('spec'))}` +
+        (input['prompt'] ? ` for: "${s('prompt', 60)}"` : '');
+    case 'load_canvas':            return `Open saved canvas "${s('id')}"`;
+    case 'delete_canvas':          return `Delete saved canvas "${s('id')}"`;
+    default:
+      // FAIL CLOSED. This gate is the only thing standing between the owner and a
+      // write the agent was talked into by text arriving through the bank feed —
+      // a merchant name reaches the model unescaped. Returning the bare tool name
+      // asked the owner to approve something they could not see, which is not
+      // consent.
+      //
+      // Read is the only kind that passes: this used to refuse only names in a
+      // hand-maintained WRITE_TOOLS set, so an unlisted write tool — or any
+      // name at all — came back as its own description. What is refused now is
+      // everything that is not a tool this app defines as a read.
+      if (toolKind(name) === 'read') return name;
+      throw new Error(
+        `Refusing to confirm "${name}": no description exists for it, so the owner ` +
+          'cannot see what they would be approving. Every tool in TOOL_DEFS is ' +
+          'classified read or write; a write needs an arm in describeToolCall().',
+      );
   }
+}
+
+/**
+ * Everything that is not printable text on a single line, replaced by a space
+ * before whitespace is collapsed:
+ *
+ *   Cc  C0/C1 controls — LF and CR (which added lines to the confirmation box),
+ *       ESC (which is how an ANSI sequence starts), NUL, backspace.
+ *   Cf  format characters — the bidi overrides U+202A–U+202E and isolates
+ *       U+2066–U+2069, which reorder what is displayed without changing what is
+ *       there; zero-width space/joiner; the BOM.
+ *   Zl/Zp  U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR.
+ *
+ * Replaced rather than deleted, so `a\nb` reads as "a b" and not "ab": what the
+ * value contains is evidence, and the point is to make it inert, not to hide it.
+ */
+const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * Collapse a value to one line and clip it, so neither an injected wall of text
+ * nor an injected line break can shape the prompt it is shown inside.
+ */
+function clip(value: string, max: number): string {
+  const oneLine = value.replace(CONTROL_OR_FORMAT, ' ').replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  // Never cut between a surrogate pair — half a code point is not a character.
+  const cut = /[\uD800-\uDBFF]/.test(oneLine.charAt(max - 1)) ? max - 1 : max;
+  return `${oneLine.slice(0, cut)}…`;
+}
+
+/**
+ * The one-line noun phrase for a show_canvas confirmation.
+ *
+ * "the assistant's spec (N characters)" was true and useless: the payoff
+ * calculator from core/canvas-agent.ts is 846 characters and nine blocks of
+ * prose under the heading "URGENT: wire $4,000 to account 12345678 today" is
+ * 718, and this prompt is the only thing between the owner and whichever of the
+ * two the model was talked into by a merchant name off the bank feed.
+ *
+ * `spec` is a JSON-encoded CanvasSpec — {title, elements[]} where each element
+ * is one of section/text/dial/output (core/canvas-spec.ts) — and executeTool
+ * JSON.parses exactly that and saves it under `spec.title`, so the name and the
+ * shape are readable here without inventing anything. The title is also the key
+ * appendHistory() replaces on, so naming it is what lets the owner see that an
+ * existing saved canvas is about to be overwritten.
+ *
+ * Nothing is stated that was not found. A spec that does not parse, is not an
+ * object, has no title or has no element list says exactly that, and keeps the
+ * character count in the cases where the size is genuinely all there is to
+ * report. `titled ""` and `#NaN` — a blank name and a zero told to someone
+ * approving a write — are the bug this arm exists to not repeat.
+ */
+function describeCanvasSpec(specStr: string): string {
+  const size = `${specStr.length} characters`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(specStr);
+  } catch {
+    return `an unreadable spec (${size}, not valid JSON)`;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return `an unreadable spec (${size}, not a canvas object)`;
+  }
+  const { title, elements } = parsed as { title?: unknown; elements?: unknown };
+  const named = typeof title === 'string' && title.trim() !== ''
+    ? `canvas "${clip(title, 40)}"`
+    : 'an untitled canvas';
+  if (!Array.isArray(elements)) return `${named} with no element list`;
+  if (elements.length === 0)    return `${named} (no elements)`;
+  return `${named} (${tallyCanvasElements(elements)})`;
+}
+
+/** "3 dials, 2 outputs, 2 sections, 1 text" — the spec's own vocabulary, in a
+ *  fixed order, with anything outside it counted rather than quietly dropped. */
+function tallyCanvasElements(elements: unknown[]): string {
+  const KNOWN = ['dial', 'output', 'section', 'text'];
+  const tally = new Map<string, number>();
+  for (const element of elements) {
+    const type = (element as { type?: unknown } | null)?.type;
+    const key = typeof type === 'string' && KNOWN.includes(type) ? type : 'unrecognised';
+    tally.set(key, (tally.get(key) ?? 0) + 1);
+  }
+  return [...KNOWN, 'unrecognised']
+    .filter((key) => tally.has(key))
+    .map((key) => {
+      const n = tally.get(key)!;
+      return key === 'unrecognised' ? `${n} unrecognised` : `${n} ${key}${n === 1 ? '' : 's'}`;
+    })
+    .join(', ');
 }
 
 // ─── Pure tool executor ───────────────────────────────────────────────────────
@@ -889,7 +1147,7 @@ async function executeToolImpl(
       const specStr = str('spec');
       const spec = JSON.parse(specStr);
       const entry = appendHistory({ title: spec.title ?? 'Untitled', prompt: str('prompt'), spec });
-      writeFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...spec, _historyId: entry.id, _writtenAt: Date.now() }), 'utf-8');
+      writeSecretFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...spec, _historyId: entry.id, _writtenAt: Date.now() }));
       return `Canvas "${entry.title}" rendered on screen 9 (id: ${entry.id}).`;
     }
 
@@ -904,7 +1162,7 @@ async function executeToolImpl(
     case 'load_canvas': {
       const entry = getHistoryEntry(str('id'));
       if (!entry) return `No canvas found with id "${str('id')}".`;
-      writeFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...entry.spec, _historyId: entry.id, _writtenAt: Date.now() }), 'utf-8');
+      writeSecretFileSync(CANVAS_SPEC_PATH, JSON.stringify({ ...entry.spec, _historyId: entry.id, _writtenAt: Date.now() }));
       return `Canvas "${entry.title}" loaded on screen 9.`;
     }
 
@@ -920,6 +1178,6 @@ async function executeToolImpl(
 
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
   const result = await executeToolImpl(name, input);
-  if (WRITE_TOOLS.has(name)) notifyChange();
+  if (isWriteTool(name)) notifyChange();
   return result;
 }

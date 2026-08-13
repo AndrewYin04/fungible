@@ -1,0 +1,229 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+/**
+ * Permission policy for everything the app writes under DATA_DIR.
+ *
+ * DATA_DIR holds the transaction database (every transaction, balance and
+ * account mask in plaintext), its backups, the Plaid token encryption key, the
+ * .env with PLAID_SECRET/LLM keys, and rendered screens. None of it is meant
+ * for anyone but the owner. That is two rules, not one:
+ *
+ *   CREATING something: directories 0700, files 0600, applied in the same
+ *   syscall that creates them so they are never briefly world-readable.
+ *
+ *   TIGHTENING something that already exists: clear the group and other bits
+ *   and change nothing else. "No one but the owner can read this" is a
+ *   statement about the group and other bits; the owner's own bits are the
+ *   owner's business. Enforcing 0600 in both directions raised a file the owner
+ *   had deliberately made read-only (0444) to 0600, handing back a write
+ *   permission they had removed on purpose. Removing access is this app's call.
+ *   Granting it is not.
+ *
+ * Both rules give the same answer on every mode an upgrade actually produces:
+ * 0644 -> 0600, 0755 -> 0700, 0664 -> 0600.
+ *
+ * This module is the only place those numbers are defined; writers import from
+ * here rather than passing their own mode (or none at all, which is how the db
+ * ended up 0644 under any umask).
+ */
+
+export const DATA_DIR_MODE = 0o700;
+export const SECRET_FILE_MODE = 0o600;
+
+/** The bits a tighten removes: group and other, all of them. */
+const SHARED_BITS = 0o077;
+
+/** What `mode` becomes once nobody but the owner can reach it. */
+function ownerOnly(mode: number): number {
+  return mode & ~SHARED_BITS;
+}
+
+function warn(target: string, mode: number, want: number, err: unknown): void {
+  process.stderr.write(
+    `[fungible] warning: ${target} is mode ${mode.toString(8)} and could not be ` +
+    `tightened to ${want.toString(8)} (${(err as Error).message}). It holds your ` +
+    `financial data — run: chmod ${want.toString(8)} ${target}\n`,
+  );
+}
+
+/**
+ * Create `dir` owner-only (0700), or clear the group and other bits if it
+ * already exists with looser ones — an install made by an earlier version left
+ * it 0755/0775.
+ *
+ * The leaf is created with the mode in the same syscall, so it is never
+ * briefly world-readable; parent directories are created with the default mode
+ * because DATA_DIR may legitimately live under a shared path.
+ *
+ * Best effort on chmod: a directory we do not own warns instead of throwing so
+ * that startup paths can call this unconditionally.
+ */
+export function ensureSecureDir(dir: string): { changed: boolean; previousMode?: number } {
+  const parent = path.dirname(dir);
+  if (parent && parent !== dir) fs.mkdirSync(parent, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { mode: DATA_DIR_MODE });
+    return { changed: false };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  return secureExisting(dir);
+}
+
+/**
+ * Clear the group and other bits on an existing file, so 0644 becomes 0600.
+ * Files SQLite creates for us (the database itself when it predates this
+ * version, `-wal`/`-shm`, and `VACUUM INTO` backups) are born 0644; nothing
+ * else in the app revisits their mode. Missing files are a no-op — the creator
+ * applies SECRET_FILE_MODE instead.
+ */
+export function secureFile(file: string): { changed: boolean; previousMode?: number } {
+  return secureExisting(file);
+}
+
+function secureExisting(target: string): { changed: boolean; previousMode?: number } {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(target);
+  } catch {
+    return { changed: false };
+  }
+  const mode = stat.mode & 0o777;
+  const want = ownerOnly(mode);
+  if (mode === want) return { changed: false };
+  try {
+    fs.chmodSync(target, want);
+    return { changed: true, previousMode: mode };
+  } catch (err) {
+    warn(target, mode, want, err);
+    return { changed: false, previousMode: mode };
+  }
+}
+
+/**
+ * Re-apply the policy to everything already inside `dir`, at any depth: clear
+ * the group and other bits from every entry it may touch, and change nothing
+ * else — a 0644 file becomes 0600 and a 0755 subdirectory becomes 0700, while a
+ * file the owner made 0444 becomes 0400 and keeps their choice. `dir` itself is
+ * left to ensureSecureDir, which is what creates it. Returns the paths it
+ * changed, and the ones it deliberately did not.
+ *
+ * Every entry type is covered, not only regular files and directories: the app
+ * writes no FIFOs, sockets or device nodes, which is exactly why one found in
+ * DATA_DIR should not be left with its group and other bits — a FIFO planted
+ * here sat at prw-rw-r--, writable by every other account on the machine, and
+ * the walk said nothing about it.
+ *
+ * DATA_DIR, not a list of file names, is the unit this policy applies to. The
+ * per-name version of the startup tighten fixed .env, fungible.db and the
+ * backups and missed everything else the app writes there — `key` (the AES key
+ * that decrypts the stored Plaid access tokens), canvas-history.json,
+ * canvas-spec.json, gui-window.json and profile.json all stayed 0644 on an
+ * upgraded install. A list is only ever as current as the last person who
+ * remembered to add to it, and the file it misses is world-readable until
+ * someone notices.
+ *
+ * What the walk will not chmod, and why:
+ *
+ *   Symlinks. chmod() acts on the link's target, so a link planted in DATA_DIR
+ *   would aim the mode at a file outside it. Skipping them also makes the walk
+ *   cycle-free.
+ *
+ *   Files with more than one name (st_nlink > 1). A hardlink is not a link as
+ *   far as readdir is concerned — it IS the file, under a second name — so it
+ *   was walked and chmodded, and the mode landed on every other name the inode
+ *   has, including names outside DATA_DIR. Nothing the app writes is ever
+ *   hardlinked, so an extra name means either something else made it (rsync
+ *   --link-dest, cp -al and borg-style backups all deduplicate by hardlinking)
+ *   or someone planted it; either way the other name is not ours to re-mode.
+ *   These are returned in `skipped` and warned about when they are actually
+ *   loose, because the walk is then leaving something group- or world-readable
+ *   inside DATA_DIR and the owner is the only one who can decide what to do
+ *   about it. Directories are exempt from this check — every directory has at
+ *   least two names ('.' and its entry in the parent) and cannot be hardlinked.
+ *
+ * What it does NOT cover: the mode is applied by path, so an entry replaced
+ * between the lstat and the chmod is still followed to whatever is there then.
+ * Closing that needs the chmod to go through a file descriptor opened
+ * O_NOFOLLOW, which is not portable to the Windows build. It requires write
+ * access to DATA_DIR, which is 0700 and owned by the owner, so anyone who can
+ * win the race can already read everything in it.
+ *
+ * Best effort, like the rest of this module: an entry that cannot be chmodded
+ * warns (via secureExisting) and the walk continues, so a startup path can call
+ * this unconditionally.
+ */
+export function secureExistingTree(dir: string): { changed: string[]; skipped: string[] } {
+  const changed: string[] = [];
+  const skipped: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return { changed, skipped }; // missing or unreadable — nothing of ours to tighten
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(full);
+    } catch {
+      continue; // vanished between readdir and here
+    }
+    if (stat.isSymbolicLink()) continue; // replaced by one in the meantime
+
+    if (stat.isDirectory()) {
+      if (secureExisting(full).changed) changed.push(full);
+      const below = secureExistingTree(full);
+      changed.push(...below.changed);
+      skipped.push(...below.skipped);
+      continue;
+    }
+    if (stat.nlink > 1) {
+      skipped.push(full);
+      if ((stat.mode & SHARED_BITS) !== 0) warnHardLink(full, stat.mode & 0o777, stat.nlink);
+      continue;
+    }
+    if (secureExisting(full).changed) changed.push(full);
+  }
+  return { changed, skipped };
+}
+
+function warnHardLink(target: string, mode: number, nlink: number): void {
+  process.stderr.write(
+    `[fungible] warning: ${target} is mode ${mode.toString(8)} and has ${nlink} names, ` +
+    'so tightening it here would change the mode of a file that may be outside your ' +
+    'data directory. Leaving it as it is — check what else points at it ' +
+    `(find / -samefile ${target}) and tighten it yourself if it is yours.\n`,
+  );
+}
+
+/**
+ * Create an empty file 0600 if it does not exist yet, so that a program which
+ * creates it itself with a laxer mode (SQLite uses 0644) opens ours instead.
+ * Returns true when the file was created by this call.
+ */
+export function touchSecureFile(file: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'wx', SECRET_FILE_MODE);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  }
+  fs.closeSync(fd);
+  return true;
+}
+
+/**
+ * writeFileSync's `mode` only applies when the file is created, so a file first
+ * written by an older version keeps its 0644 forever. This writes and then
+ * enforces the mode, and is what every writer of DATA_DIR content should use.
+ */
+export function writeSecretFileSync(file: string, data: string | Buffer): void {
+  fs.writeFileSync(file, data, { mode: SECRET_FILE_MODE });
+  secureFile(file);
+}

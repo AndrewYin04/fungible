@@ -1,10 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useQuery } from '../hooks/useQuery.js';
-import { useNav } from '../hooks/useNav.js';
-import { fmt, fmtSigned, fmtPct, fmtMonths, fmtCompact } from '../../../../core/fmt.js';
-import { getDriftWindows, getPeriodStart } from '../../../../core/dateUtils.js';
-import { bucketDrift } from '../../../../core/scorecard.js';
+import { fmt, fmtPct, fmtMonths, fmtCompact } from '../../../../core/fmt.js';
 import { KeyHints } from '../components/KeyHints.js';
 import styles from './Health.module.css';
 
@@ -30,21 +27,7 @@ function roundToStep(n: number): number {
 }
 
 export function Health() {
-  const { navigate } = useNav();
   const data = useQuery(() => api.health.loadHealthData(), []);
-
-  const drift = useQuery(() => {
-    const today = new Date();
-    const w = getDriftWindows('last30', getPeriodStart('last30', today), today);
-    return w
-      ? api.queries.getCategoryDriftData(w.current, w.lastPeriod, w.lastYear, w.rolling12)
-      : Promise.resolve(null);
-  }, []);
-  const scorecard = useMemo(() => (drift ? bucketDrift(drift) : null), [drift]);
-  const topUnder = useMemo(
-    () => (scorecard ? [...scorecard.under].sort((a, b) => a.medianDelta - b.medianDelta).slice(0, 2) : []),
-    [scorecard],
-  );
 
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
   const [monthlySavings, setMonthlySavings] = useState<number | null>(null);
@@ -144,7 +127,7 @@ export function Health() {
                         ? 'FIRE pace'
                         : 'on track'}
               {savingsRate !== null && pretax > 0 && rawSavingsRate !== null
-                ? ` (${fmtPct(rawSavingsRate)} take-home)`
+                ? ` · ${fmtPct(rawSavingsRate)} take-home`
                 : ''}
             </span>
           </div>
@@ -161,12 +144,12 @@ export function Health() {
           {data.totalDebt > 0 && (
             <div className={styles.metric}>
               <span className={styles.metricLabel}>Debt</span>
-              <span className={`num ${netCash >= 0 ? 'pos' : 'neg'} ${styles.metricValue}`}>
+              <span className={`num neg ${styles.metricValue}`}>
                 {fmtCompact(data.totalDebt)}
               </span>
               <span className={`dim ${styles.metricHint}`}>
                 {netCash >= 0
-                  ? `covered — ${fmtCompact(netCash)} net cash`
+                  ? `covered · ${fmtCompact(netCash)} net cash`
                   : `${fmtCompact(Math.abs(netCash))} more than cash`}
               </span>
             </div>
@@ -231,48 +214,6 @@ export function Health() {
           </div>
         </section>
       </div>
-
-      {scorecard && (scorecard.over.length > 0 || scorecard.under.length > 0) && (
-        <section className={`${styles.panel} ${styles.panelCompact}`}>
-          <h2>Last 30 days · vs typical</h2>
-          {scorecard.over.length > 0 && (
-            <div className={styles.scorecardRow}>
-              <span className={styles.scLabel}>Watch</span>
-              <span>
-                {scorecard.over.slice(0, 2).map((r, i) => (
-                  <React.Fragment key={r.category}>
-                    {i > 0 && <span className="dim"> · </span>}
-                    <span className="neg">{r.category} {fmtSigned(r.medianDelta, 0)}</span>
-                  </React.Fragment>
-                ))}
-              </span>
-            </div>
-          )}
-          {topUnder.length > 0 && (
-            <div className={styles.scorecardRow}>
-              <span className={styles.scLabel}>Good</span>
-              <span>
-                {topUnder.map((r, i) => (
-                  <React.Fragment key={r.category}>
-                    {i > 0 && <span className="dim"> · </span>}
-                    <span className="pos">{r.category} {fmtSigned(r.medianDelta, 0)}</span>
-                  </React.Fragment>
-                ))}
-              </span>
-            </div>
-          )}
-          <div className={styles.scorecardNetRow}>
-            <span className={styles.scLabel}>Net</span>
-            <span className={`num ${scorecard.net <= 0 ? 'pos' : 'warn'}`}>{fmtSigned(scorecard.net, 0)}</span>
-            <button
-              className={`dim ${styles.scorecardLink}`}
-              onClick={() => navigate('dashboard', { range: 'last30', scorecard: true })}
-            >
-              full scorecard →
-            </button>
-          </div>
-        </section>
-      )}
 
       <section className={styles.panel}>
         <h2>Assumptions</h2>
